@@ -44,6 +44,7 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
 import androidx.core.content.pm.PackageInfoCompat
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.BufferedOutputStream
@@ -110,7 +111,7 @@ object Props {
             "Cao" to android.media.ExifInterface.TAG_IMAGE_LENGTH,
             "Phơi sáng" to android.media.ExifInterface.TAG_EXPOSURE_TIME,
             "Khẩu độ" to android.media.ExifInterface.TAG_F_NUMBER,
-            "ISO" to android.media.ExifInterface.TAG_PHOTOGRAPHIC_SENSITIVITY,
+            "ISO" to "ISOSpeedRatings",
             "Tiêu cự" to android.media.ExifInterface.TAG_FOCAL_LENGTH,
             "Flash" to android.media.ExifInterface.TAG_FLASH,
             "Xoay" to android.media.ExifInterface.TAG_ORIENTATION,
