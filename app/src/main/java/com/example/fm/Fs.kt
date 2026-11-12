@@ -178,4 +178,33 @@ object Fs {
         if (hasRoot() && Shell.cmd("mv ${q(path)} ${q(dst.path)}").exec().isSuccess) return true
         return copy(path, destDir) && delete(path)
     }
+
+    /** Overwrite a text file; falls back to root (via a temp copy) when the app cannot write it. */
+    fun writeText(path: String, text: String) {
+        val f = File(path)
+        try {
+            f.writeText(text)
+        } catch (e: java.io.IOException) {
+            if (!hasRoot()) throw e
+            val tmp = File.createTempFile("edit", ".tmp")
+            try {
+                tmp.writeText(text)
+                if (!Shell.cmd("cat ${q(tmp.path)} > ${q(path)}").exec().isSuccess) throw e
+            } finally {
+                tmp.delete()
+            }
+        }
+    }
+
+    /** "755 user group" via root, or null. */
+    fun statPerm(path: String): String? {
+        if (!hasRoot()) return null
+        val r = Shell.cmd("stat -L -c '%a %U %G' ${q(path)}").exec()
+        return if (r.isSuccess) r.out.firstOrNull() else null
+    }
+
+    fun chmod(path: String, mode: String, recursive: Boolean): Boolean {
+        if (!hasRoot() || !Regex("[0-7]{3,4}").matches(mode)) return false
+        return Shell.cmd("chmod ${if (recursive) "-R " else ""}$mode ${q(path)}").exec().isSuccess
+    }
 }

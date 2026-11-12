@@ -41,6 +41,7 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.StarBorder
@@ -114,7 +115,7 @@ private val MenuLine = Color(0xFF66666D)
 private val MenuAccent = Color(0xFF9CC2FF)
 private val MenuDanger = Color(0xFFFF7B72)
 
-private fun copyText(ctx: Context, text: String) {
+internal fun copyText(ctx: Context, text: String) {
     ctx.getSystemService(ClipboardManager::class.java)
         .setPrimaryClip(ClipData.newPlainText("fm", text))
     Toast.makeText(ctx, "Đã sao chép", Toast.LENGTH_SHORT).show()
@@ -327,7 +328,12 @@ fun FmRoot(vm: FmViewModel) {
     vm.picker?.let { p -> FolderPicker(p.start, { vm.picker = null }) { vm.picker = null; p.onPick(it) } }
 
 
-    vm.viewing?.let { Viewer(it) { vm.viewing = null } }
+    vm.viewing?.let { Viewer(it, vm.viewSiblings) { vm.viewing = null } }
+    vm.editing?.let { item -> TextEditor(item) { vm.editing = null } }
+    vm.propsItem?.let { item -> PropertiesDialog(item, vm.rooted) { vm.propsItem = null } }
+    vm.batch?.let { list ->
+        BatchRenameDialog(list, { vm.batch = null }) { sorted, names -> vm.batch = null; vm.batchRename(sorted, names) }
+    }
     if (DLog.enabled && vm.showLog) LogDialog { vm.showLog = false }
 }
 
@@ -345,6 +351,8 @@ fun PaneScreen(vm: FmViewModel, idx: Int) {
     var cloneDlg by remember { mutableStateOf(false) }
     var gitMenu by remember { mutableStateOf(false) }
     var favOpen by remember { mutableStateOf(false) }
+    var moreMenu by remember { mutableStateOf(false) }
+    var searchOpen by remember { mutableStateOf(false) }
 
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize()) {
@@ -384,6 +392,22 @@ fun PaneScreen(vm: FmViewModel, idx: Int) {
                 Pill("Cắt", Icons.Default.ContentCut, Modifier.weight(1f)) { vm.cut(idx, vm.selectedItems(idx)) }
                 Pill("Nén", Icons.Default.Archive, Modifier.weight(1f)) { vm.compress(vm.selectedItems(idx)) }
                 Pill("Xóa", Icons.Default.Delete, Modifier.weight(1f), danger = true) { vm.delete(vm.selectedItems(idx)) }
+                Box(Modifier.weight(1f)) {
+                    Pill("Thêm", Icons.Default.MoreHoriz, Modifier.fillMaxWidth()) { moreMenu = true }
+                    DropdownMenu(
+                        expanded = moreMenu, onDismissRequest = { moreMenu = false },
+                        modifier = Modifier.widthIn(min = 240.dp), shape = RoundedCornerShape(20.dp), containerColor = MenuBg,
+                    ) {
+                        val sel = vm.selectedItems(idx)
+                        if (sel.size == 1) MenuRow(Icons.Default.Info, "Thuộc tính", MenuAccent) { moreMenu = false; vm.propsItem = sel[0] }
+                        if (sel.size == 1 && !sel[0].isDir) {
+                            MenuRow(Icons.Default.Edit, "Mở bằng trình soạn thảo", MenuAccent) { moreMenu = false; vm.editing = sel[0] }
+                        }
+                        if (sel.size >= 2) {
+                            MenuRow(Icons.Default.DriveFileRenameOutline, "Đổi tên hàng loạt", MenuAccent) { moreMenu = false; vm.batch = sel }
+                        }
+                    }
+                }
             }
 
             // Bottom address bar (tap = shortcuts, selectable text) or selection summary
@@ -466,6 +490,12 @@ fun PaneScreen(vm: FmViewModel, idx: Int) {
                     MenuRow(Icons.Default.CreateNewFolder, "Thư mục mới", MenuAccent) { go { newFolder = true } }
                     MenuRow(Icons.Default.NoteAdd, "Tệp mới", MenuAccent) { go { newFile = true } }
                     HorizontalDivider(Modifier.padding(vertical = 6.dp), color = MenuLine)
+                    MenuRow(Icons.Default.Search, "Tìm kiếm", MenuAccent) { go { searchOpen = true } }
+                    MenuRow(Icons.Default.Refresh, "Làm mới", MenuAccent) { go { vm.refresh(idx) } }
+                    if (pane.canBack) MenuRow(Icons.AutoMirrored.Filled.ArrowBack, "Quay lại", MenuAccent) { go { vm.goBack(idx) } }
+                    if (pane.canFwd) MenuRow(Icons.AutoMirrored.Filled.ArrowForward, "Tiến tới", MenuAccent) { go { vm.goForward(idx) } }
+                    MenuRow(Icons.Default.SyncAlt, "Mở thư mục này ở tab kia", MenuAccent) { go { vm.syncOther(idx) } }
+                    HorizontalDivider(Modifier.padding(vertical = 6.dp), color = MenuLine)
                     if (root == null) MenuRow(Icons.Default.Source, "Git init", MenuAccent) { go { vm.gitInit(idx) } }
                     MenuRow(Icons.Default.CloudDownload, "Git clone", MenuAccent) { go { cloneDlg = true } }
                 }
@@ -473,6 +503,7 @@ fun PaneScreen(vm: FmViewModel, idx: Int) {
         }
     }
 
+    if (searchOpen) SearchDialog(vm, idx) { searchOpen = false }
     renaming?.let { item ->
         NameDialog("Đổi tên", item.name, { renaming = null }) { vm.rename(item, it); renaming = null }
     }
@@ -610,6 +641,16 @@ private fun ColumnScope.ItemMenuContent(
         acts += Act(if (fav) Icons.Outlined.StarBorder else Icons.Default.Star,
             if (fav) "Bỏ khỏi lối tắt" else "Thêm vào lối tắt") { vm.toggleFavorite(item.path) }
     }
+    acts += Act(Icons.Default.Info, "Thuộc tính") { vm.propsItem = item }
+    if (!item.isDir) acts += Act(Icons.Default.Edit, "Mở bằng trình soạn thảo") { vm.editing = item }
+    if (!item.isDir && item.name.lowercase().endsWith(".apk")) {
+        acts += Act(Icons.Default.Android, "Thông tin APK") { vm.apkInfo(item) }
+        acts += Act(Icons.Default.InstallMobile, "Cài đặt APK") { vm.installApk(item) }
+    }
+    val c = vm.clip
+    if (!item.isDir && item.name.lowercase().endsWith(".zip") && c != null) {
+        acts += Act(Icons.Default.FolderZip, "Thêm ${c.items.size} mục đã chép vào ZIP") { vm.addClipToZip(item) }
+    }
     acts += Act(Icons.Default.Delete, "Xóa", danger = true) { vm.delete(listOf(item)) }
 
     acts.forEach { a ->
@@ -720,20 +761,33 @@ private fun LogDialog(onClose: () -> Unit) {
     }
 }
 
-/** Built-in viewer: image (Coil), media (Media3), text. */
+/** Built-in viewer: images (swipe between the folder's pictures, EXIF) and audio/video (Media3). */
 @Composable
-private fun Viewer(item: FItem, onClose: () -> Unit) {
+private fun Viewer(item: FItem, siblings: List<FItem>, onClose: () -> Unit) {
     val ext = item.name.substringAfterLast('.', "").lowercase()
+    var exif by remember { mutableStateOf<String?>(null) }
+    val imgs = remember(item.path, siblings) { siblings.ifEmpty { listOf(item) } }
+    val pager = rememberPagerState(
+        initialPage = imgs.indexOfFirst { it.path == item.path }.coerceAtLeast(0), pageCount = { imgs.size },
+    )
+    val isImage = ext in FmViewModel.imageExt
+    val shown = if (isImage) imgs[pager.currentPage.coerceIn(0, imgs.size - 1)] else item
     Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Surface(Modifier.fillMaxSize()) {
             Column(Modifier.systemBarsPadding()) {
                 Row(Modifier.fillMaxWidth().padding(4.dp), verticalAlignment = Alignment.CenterVertically) {
                     IconButton(onClick = onClose) { Icon(Icons.Default.Close, "Đóng") }
-                    Text(item.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(shown.name, Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    if (isImage) {
+                        if (imgs.size > 1) Text("${pager.currentPage + 1}/${imgs.size}", fontSize = 13.sp)
+                        IconButton(onClick = { exif = Props.exif(shown.path) }) { Icon(Icons.Default.Info, "EXIF") }
+                    }
                 }
-                when (ext) {
-                    in FmViewModel.imageExt -> AsyncImage(File(item.path), item.name, Modifier.fillMaxSize())
-                    in FmViewModel.mediaExt -> {
+                when {
+                    isImage -> HorizontalPager(pager, Modifier.fillMaxSize()) { p ->
+                        AsyncImage(File(imgs[p].path), imgs[p].name, Modifier.fillMaxSize())
+                    }
+                    else -> {
                         val ctx = LocalContext.current
                         val player = remember {
                             ExoPlayer.Builder(ctx).build().apply {
@@ -744,24 +798,17 @@ private fun Viewer(item: FItem, onClose: () -> Unit) {
                         DisposableEffect(Unit) { onDispose { player.release() } }
                         AndroidView({ PlayerView(it).apply { this.player = player } }, Modifier.fillMaxSize())
                     }
-                    else -> {
-                        val text by produceState("Đang đọc…", item.path) {
-                            value = runCatching {
-                                File(item.path).bufferedReader().use { r ->
-                                    val buf = CharArray(200_000)
-                                    val n = r.read(buf)
-                                    if (n <= 0) "" else String(buf, 0, n)
-                                }
-                            }.getOrElse { "Không đọc được: ${it.message}" }
-                        }
-                        SelectionContainer {
-                            Text(text, Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(12.dp),
-                                fontFamily = FontFamily.Monospace, fontSize = 12.sp)
-                        }
-                    }
                 }
             }
         }
+    }
+    exif?.let { t ->
+        AlertDialog(
+            onDismissRequest = { exif = null },
+            title = { Text("EXIF") },
+            confirmButton = { TextButton(onClick = { exif = null }) { Text("Đóng") } },
+            text = { SelectionContainer { Text(t, Modifier.verticalScroll(rememberScrollState()), fontFamily = FontFamily.Monospace, fontSize = 12.sp) } },
+        )
     }
 }
 

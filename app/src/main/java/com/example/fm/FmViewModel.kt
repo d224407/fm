@@ -11,6 +11,8 @@ import androidx.core.content.FileProvider
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.File
 
@@ -23,6 +25,10 @@ class PaneState(start: String) {
     var selected by mutableStateOf<Set<String>>(emptySet())
     var archive by mutableStateOf<ArchiveCtx?>(null)
     var gitRoot by mutableStateOf<String?>(null)
+    val back = ArrayDeque<String>()
+    val fwd = ArrayDeque<String>()
+    var canBack by mutableStateOf(false)
+    var canFwd by mutableStateOf(false)
 }
 
 /** Copy/cut buffer shared by both tabs. */
@@ -44,6 +50,13 @@ class FmViewModel(private val app: Application) : AndroidViewModel(app) {
     var rooted by mutableStateOf(false); private set
     var showLog by mutableStateOf(false)
     var clip by mutableStateOf<Clip?>(null)
+    var editing by mutableStateOf<FItem?>(null)
+    var propsItem by mutableStateOf<FItem?>(null)
+    var batch by mutableStateOf<List<FItem>?>(null)
+    var viewSiblings by mutableStateOf<List<FItem>>(emptyList())
+    var search by mutableStateOf<SearchState?>(null)
+    private var searchJob: Job? = null
+    private val cachePrefix = File(app.cacheDir, "archive_view").path
 
     init {
         viewModelScope.launch(Dispatchers.IO) {
@@ -72,14 +85,43 @@ class FmViewModel(private val app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun navigate(i: Int, path: String) {
+    fun navigate(i: Int, path: String, record: Boolean = true) {
         val p = panes[i]
         val a = p.archive
+        // history skips archive views (their cache folders are temporary)
+        if (record && a == null && p.path != path && !path.startsWith(cachePrefix) && !p.path.startsWith(cachePrefix)) {
+            p.back.addLast(p.path)
+            if (p.back.size > 100) p.back.removeFirst()
+            p.fwd.clear()
+        }
         if (a != null && path != a.root && !path.startsWith(a.root + "/")) p.archive = null
         p.selected = emptySet()
         p.path = path
+        p.canBack = p.back.isNotEmpty()
+        p.canFwd = p.fwd.isNotEmpty()
         DLog.d("navigate pane=$i path=$path")
         refresh(i)
+    }
+
+    fun goBack(i: Int) {
+        val p = panes[i]
+        val t = p.back.removeLastOrNull() ?: return
+        p.fwd.addLast(p.path)
+        navigate(i, t, record = false)
+    }
+
+    fun goForward(i: Int) {
+        val p = panes[i]
+        val t = p.fwd.removeLastOrNull() ?: return
+        p.back.addLast(p.path)
+        navigate(i, t, record = false)
+    }
+
+    /** Open this pane's folder in the other pane. */
+    fun syncOther(i: Int) {
+        val o = 1 - i
+        if (panes[o].archive != null) panes[o].archive = null
+        navigate(o, panes[i].path)
     }
 
     fun up(i: Int) {
@@ -114,7 +156,12 @@ class FmViewModel(private val app: Application) : AndroidViewModel(app) {
         val ext = item.name.substringAfterLast('.', "").lowercase()
         when {
             Archives.isArchive(item.name) -> openArchive(i, item)
-            ext in viewable -> viewing = item
+            ext in imageExt -> {
+                viewSiblings = panes[i].items.filter { !it.isDir && it.name.substringAfterLast('.', "").lowercase() in imageExt }
+                viewing = item
+            }
+            ext in mediaExt -> { viewSiblings = emptyList(); viewing = item }
+            ext in textExt -> editing = item
             else -> openExternal(item)
         }
     }
@@ -258,6 +305,63 @@ class FmViewModel(private val app: Application) : AndroidViewModel(app) {
 
     fun pickAndExtract(item: FItem, from: String) {
         picker = PickTarget(from) { extractTo(item, File(it)) }
+    }
+
+    // ---- Search / batch rename / APK / ZIP ----
+
+    fun startSearch(root: String, o: SearchOpts) {
+        searchJob?.cancel()
+        val st = SearchState(root, o.query)
+        search = st
+        searchJob = viewModelScope.launch(Dispatchers.IO) {
+            try {
+                Searcher.run(File(root), o, st) { isActive }
+            } catch (t: Throwable) {
+                if (t !is java.util.concurrent.CancellationException) {
+                    DLog.e("search failed", t)
+                    st.error = t.message ?: t.javaClass.simpleName
+                }
+            } finally {
+                st.running = false
+            }
+        }
+    }
+
+    fun stopSearch() { searchJob?.cancel() }
+
+    fun batchRename(items: List<FItem>, names: List<String>) = run {
+        if (items.isEmpty() || items.size != names.size) error("Danh sách không hợp lệ")
+        if (names.any { !validName(it) } || names.toSet().size != names.size) error("Tên mới không hợp lệ hoặc trùng nhau")
+        val dir = File(items[0].path).parentFile ?: error("Không có thư mục cha")
+        val own = items.map { it.name }.toSet()
+        names.forEach { if (it !in own && File(dir, it).exists()) error("Đã tồn tại: $it") }
+        // two phases (via temp names) so swaps and shifts cannot collide
+        val tmp = ArrayList<File>()
+        try {
+            items.forEachIndexed { k, it ->
+                val t = File(dir, ".fm-tmp-$k-${System.nanoTime()}")
+                if (!Fs.rename(it.path, t.name)) error("Đổi tên thất bại: ${it.name}")
+                tmp += t
+            }
+        } catch (ex: Throwable) {
+            tmp.forEachIndexed { k, t -> Fs.rename(t.path, items[k].name) } // roll back
+            throw ex
+        }
+        val fail = ArrayList<String>()
+        tmp.forEachIndexed { k, t -> if (!Fs.rename(t.path, names[k])) { fail += names[k]; Fs.rename(t.path, items[k].name) } }
+        panes.indices.forEach { clearSelection(it) }
+        if (fail.isNotEmpty()) error("Đổi tên thất bại: ${fail.joinToString()}")
+    }
+
+    fun apkInfo(item: FItem) = show("APK · ${item.name}") { ApkTools.info(app, item.path) }
+
+    fun installApk(item: FItem) {
+        runCatching { ApkTools.install(app, item.path) }.onFailure { message = it.message ?: it.javaClass.simpleName }
+    }
+
+    fun addClipToZip(zip: FItem) {
+        val c = clip ?: return
+        run { ZipEdit.add(File(zip.path), c.items.map { File(it.path) }) }
     }
 
     // ---- Git ----
