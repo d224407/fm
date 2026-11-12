@@ -34,14 +34,17 @@ object Archives {
     fun isArchive(name: String) = exts.any { name.lowercase().endsWith(it) }
 
     /** All [srcs] (same parent folder) go into one .tar.zst; returns the file written. */
-    fun compress(srcs: List<File>, level: Int = 9): File {
+    fun compress(srcs: List<File>, level: Int = 3): File {
         val base = srcs.first().parentFile ?: File("/")
         val stem = if (srcs.size == 1) srcs[0].name else base.name.ifEmpty { "archive" }
         var out = File(base, "$stem.tar.zst")
         var n = 1
         while (out.exists()) out = File(base, "$stem (${n++}).tar.zst")
         try {
-            TarArchiveOutputStream(ZstdOutputStream(FileOutputStream(out).buffered(256 * 1024), level)).use { tar ->
+            val zs = ZstdOutputStream(FileOutputStream(out).buffered(256 * 1024), level)
+            // multithreaded compression when the native lib supports it
+            runCatching { zs.setWorkers(Runtime.getRuntime().availableProcessors().coerceIn(1, 8)) }
+            TarArchiveOutputStream(zs).use { tar ->
                 tar.setLongFileMode(TarArchiveOutputStream.LONGFILE_POSIX)
                 tar.setBigNumberMode(TarArchiveOutputStream.BIGNUMBER_POSIX)
                 for (src in srcs) src.walkTopDown().forEach { f ->
@@ -63,13 +66,13 @@ object Archives {
         val n = archive.name.lowercase()
         when {
             n.endsWith(".7z") -> SevenZFile(archive).use { z ->
+                val buf = ByteArray(256 * 1024)
                 while (true) {
                     val e = z.nextEntry ?: break
                     val t = safe(dest, e.name)
                     if (e.isDirectory) t.mkdirs() else {
                         t.parentFile?.mkdirs()
                         t.outputStream().use { o ->
-                            val buf = ByteArray(256 * 1024)
                             while (true) { Work.check(); val r = z.read(buf); if (r < 0) break; o.write(buf, 0, r) }
                         }
                     }
@@ -98,18 +101,19 @@ object Archives {
     fun unzip(zip: File, dest: File) {
         dest.mkdirs()
         ZipFile(zip).use { z ->
-            val files = ArrayList<java.util.zip.ZipEntry>()
+            val files = ArrayList<Pair<java.util.zip.ZipEntry, File>>()
+            val made = HashSet<File>()
             for (e in z.entries()) {
                 Work.check()
                 val t = safe(dest, e.name)
-                if (e.isDirectory) t.mkdirs() else { t.parentFile?.mkdirs(); files += e }
+                if (e.isDirectory) t.mkdirs() else { t.parentFile?.let { if (made.add(it)) it.mkdirs() }; files += e to t }
             }
-            val pool = java.util.concurrent.Executors.newFixedThreadPool(4)
+            val pool = java.util.concurrent.Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors().coerceIn(2, 6))
             try {
-                files.map { e ->
+                files.map { (e, t) ->
                     pool.submit {
                         Work.check()
-                        z.getInputStream(e).use { i -> safe(dest, e.name).outputStream().use { o -> Work.copy(i, o) } }
+                        z.getInputStream(e).use { i -> t.outputStream().use { o -> Work.copy(i, o) } }
                     }
                 }.forEach { it.get() }
             } catch (ex: java.util.concurrent.ExecutionException) {
@@ -134,9 +138,10 @@ object Archives {
 
     /** Zip-slip guard. */
     private fun safe(dest: File, name: String): File {
-        val root = dest.canonicalFile
-        val t = File(root, name).canonicalFile
-        require(t == root || t.path.startsWith(root.path + File.separator)) { "Đường dẫn không hợp lệ: $name" }
-        return t
+        // pure path math (no syscalls per entry)
+        val root = dest.absoluteFile.toPath().normalize()
+        val t = root.resolve(name.trimStart('/')).normalize()
+        require(t.startsWith(root)) { "Đường dẫn không hợp lệ: $name" }
+        return t.toFile()
     }
 }

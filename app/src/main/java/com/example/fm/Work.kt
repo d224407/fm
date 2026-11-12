@@ -11,8 +11,10 @@ object Work {
     fun check() { if (cancelled) throw CancellationException("cancelled") }
 
     /** Buffered copy that can be cancelled between chunks. */
+    private val bufs = ThreadLocal.withInitial { ByteArray(256 * 1024) }
+
     fun copy(i: InputStream, o: OutputStream) {
-        val buf = ByteArray(256 * 1024)
+        val buf = bufs.get()!!
         while (true) {
             check()
             val r = i.read(buf)

@@ -17,6 +17,9 @@ data class FItem(
 object Fs {
     @Volatile private var rootCache: Boolean? = null
 
+    /** App cache (extracted archives): readable directly, never worth a root shell. */
+    @Volatile var localPrefix = "\u0000"
+
     /** Blocking on first call (spawns su); never call on the main thread. */
     fun hasRoot(): Boolean = rootCache ?: runCatching { Shell.getShell().isRoot }.getOrDefault(false)
         .also { rootCache = it; DLog.i("root check -> $it") }
@@ -32,7 +35,7 @@ object Fs {
     fun list(path: String): List<FItem> {
         val inStorage = path.startsWith(android.os.Environment.getExternalStorageDirectory().path)
         // Outside shared storage the app sees a filtered view; prefer root when available
-        val viaRoot = if (!inStorage && hasRoot()) listRoot(path) else null
+        val viaRoot = if (!inStorage && !path.startsWith(localPrefix) && hasRoot()) listRoot(path) else null
         val arr = if (viaRoot != null && viaRoot.isNotEmpty()) null else File(path).listFiles()
         val raw = when {
             viaRoot != null && viaRoot.isNotEmpty() -> viaRoot
@@ -44,7 +47,7 @@ object Fs {
             else -> emptyList()
         }
         val res = if (raw.isEmpty()) ancestorEntry(path) else raw
-        return res.sortedWith(compareByDescending<FItem> { it.isDir }.thenBy { it.name.lowercase() })
+        return res.sortedWith(compareByDescending<FItem> { it.isDir }.thenBy(String.CASE_INSENSITIVE_ORDER) { it.name })
     }
 
     /** Reads only the first entry instead of the whole directory. */
@@ -66,11 +69,28 @@ object Fs {
 
     private fun listRoot(path: String): List<FItem> {
         val base = path.trimEnd('/')
-        val repos = Shell.cmd("cd ${q(path)} && ls -d ./*/.git 2>/dev/null").exec().out
-            .map { it.removePrefix("./").removeSuffix("/.git") }.toSet()
-        val empties = Shell.cmd("cd ${q(path)} && find . -maxdepth 1 -mindepth 1 -type d -empty 2>/dev/null").exec().out
-            .map { it.removePrefix("./") }.toSet()
-        val out = Shell.cmd("cd ${q(path)} && stat -L -c '%F|%s|%Y|%n' ./* ./.[!.]* 2>/dev/null").exec().out
+        // one shell round trip; sections: repos, empty dirs, stat lines
+        val all = Shell.cmd(
+            "( cd ${q(path)} 2>/dev/null && { echo @R; ls -d ./*/.git 2>/dev/null; " +
+                "echo @E; find . -maxdepth 1 -mindepth 1 -type d -empty 2>/dev/null; " +
+                "echo @S; stat -L -c '%F|%s|%Y|%n' ./* ./.[!.]* 2>/dev/null; } )",
+        ).exec().out
+        val repos = HashSet<String>()
+        val empties = HashSet<String>()
+        val out = ArrayList<String>()
+        var sec = ' '
+        for (l in all) {
+            when (l) {
+                "@R" -> sec = 'R'
+                "@E" -> sec = 'E'
+                "@S" -> sec = 'S'
+                else -> when (sec) {
+                    'R' -> repos += l.removePrefix("./").removeSuffix("/.git")
+                    'E' -> empties += l.removePrefix("./")
+                    'S' -> out += l
+                }
+            }
+        }
         return out.mapNotNull { line ->
             val p = line.split('|', limit = 4)
             if (p.size < 4) return@mapNotNull null
