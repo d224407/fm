@@ -36,3 +36,6 @@
 -dontwarn com.beust.**
 -dontwarn org.apache.commons.collections4.**
 -dontwarn com.android.apksig.**
+
+# apksig: ASN.1 encoder uses reflection on fields and annotations
+-keep class com.android.apksig.** { *; }
