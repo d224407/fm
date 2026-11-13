@@ -107,6 +107,7 @@ dependencies {
     implementation("${libs.zstd.jni.get()}@aar")
     implementation(libs.commons.compress)
     implementation(libs.xz)
+    implementation(libs.zip4j) // password-protected zip (read + write)
 
     // Git
     implementation(libs.jgit)

@@ -8,6 +8,7 @@ libsu = "6.0.0"
 zstdJni = "1.5.7-4"
 commonsCompress = "1.27.1"
 xz = "1.10"
+zip4j = "2.11.5"
 jgit = "5.13.3.202401111512-r"
 slf4j = "2.0.16"
 coil = "3.3.0"
@@ -27,6 +28,7 @@ libsu-core = { group = "com.github.topjohnwu.libsu", name = "core", version.ref 
 zstd-jni = { group = "com.github.luben", name = "zstd-jni", version.ref = "zstdJni" }
 commons-compress = { group = "org.apache.commons", name = "commons-compress", version.ref = "commonsCompress" }
 xz = { group = "org.tukaani", name = "xz", version.ref = "xz" }
+zip4j = { group = "net.lingala.zip4j", name = "zip4j", version.ref = "zip4j" }
 
 jgit = { group = "org.eclipse.jgit", name = "org.eclipse.jgit", version.ref = "jgit" }
 slf4j-jdk14 = { group = "org.slf4j", name = "slf4j-jdk14", version.ref = "slf4j" }

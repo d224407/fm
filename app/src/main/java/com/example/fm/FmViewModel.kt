@@ -20,6 +20,9 @@ import java.io.File
 /** An archive opened as a virtual folder: [root] is the extracted copy of [file] in cache. */
 data class ArchiveCtx(val file: String, val root: String)
 
+/** Password prompt for an encrypted archive; [wrong] = the previous password failed. */
+class PwdAsk(val label: String, val wrong: Boolean, val onOk: (CharArray) -> Unit)
+
 class PaneState(start: String) {
     var path by mutableStateOf(start)
     var items by mutableStateOf<List<FItem>>(emptyList())
@@ -57,6 +60,8 @@ class FmViewModel(private val app: Application) : AndroidViewModel(app) {
     var viewSiblings by mutableStateOf<List<FItem>>(emptyList())
     var search by mutableStateOf<SearchState?>(null)
     var quick by mutableStateOf<Pair<FItem, ApkOps.Info>?>(null)
+    var pwdAsk by mutableStateOf<PwdAsk?>(null)
+    var compressAsk by mutableStateOf<List<FItem>?>(null)
     private var searchJob: Job? = null
     private val cachePrefix = File(app.cacheDir, "archive_view").path
 
@@ -181,23 +186,31 @@ class FmViewModel(private val app: Application) : AndroidViewModel(app) {
     }
 
     /** Extract the archive into cache and browse it like a folder. */
-    fun openArchive(i: Int, item: FItem) = run {
-        val f = File(item.path)
-        val key = (item.path + f.lastModified()).hashCode().toUInt().toString(16)
-        val dest = File(app.cacheDir, "archive_view/$key")
-        val done = File(dest.parentFile, "$key.done")
-        if (!done.exists()) {
-            dest.deleteRecursively()
-            try {
-                Archives.extract(f, dest)
-                done.createNewFile()
-            } catch (t: Throwable) {
+    fun openArchive(i: Int, item: FItem, pw: CharArray? = null) = run {
+        try {
+            val f = File(item.path)
+            val key = (item.path + f.lastModified()).hashCode().toUInt().toString(16)
+            val dest = File(app.cacheDir, "archive_view/$key")
+            val done = File(dest.parentFile, "$key.done")
+            if (!done.exists()) {
                 dest.deleteRecursively()
-                throw t
+                try {
+                    Archives.extract(f, dest, pw)
+                    done.createNewFile()
+                } catch (t: Throwable) {
+                    dest.deleteRecursively()
+                    throw t
+                }
             }
+            panes[i].archive = ArchiveCtx(item.path, dest.path)
+            navigate(i, dest.path)
+        } catch (e: PasswordNeeded) {
+            askPassword(item.name, e.wrong) { openArchive(i, item, it) }
         }
-        panes[i].archive = ArchiveCtx(item.path, dest.path)
-        navigate(i, dest.path)
+    }
+
+    private fun askPassword(label: String, wrong: Boolean, onOk: (CharArray) -> Unit) {
+        pwdAsk = PwdAsk(label, wrong, onOk)
     }
 
     // ---- Selection ----
@@ -291,12 +304,21 @@ class FmViewModel(private val app: Application) : AndroidViewModel(app) {
         if (!Fs.createFile(panes[i].path, n)) error("Không tạo được tệp (đã tồn tại?)")
     }
 
-    fun compress(items: List<FItem>) = run {
-        Archives.compress(items.map { File(it.path) })
+    /** Opens the compress dialog (format / level / password). */
+    fun compress(items: List<FItem>) { if (items.isNotEmpty()) compressAsk = items }
+
+    fun doCompress(items: List<FItem>, fmt: ArcFormat, level: ArcLevel, pw: CharArray?) = run {
+        Archives.compress(items.map { File(it.path) }, fmt, level, pw)
         panes.indices.forEach { clearSelection(it) }
     }
 
-    fun extractTo(item: FItem, dir: File) = run { Archives.extract(File(item.path), dir) }
+    fun extractTo(item: FItem, dir: File, pw: CharArray? = null) = run {
+        try {
+            Archives.extract(File(item.path), dir, pw)
+        } catch (e: PasswordNeeded) {
+            askPassword(item.name, e.wrong) { extractTo(item, dir, it) }
+        }
+    }
 
     fun extractHere(item: FItem) = extractTo(item, File(item.path).parentFile ?: File("/"))
 

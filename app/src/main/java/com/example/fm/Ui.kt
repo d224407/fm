@@ -48,6 +48,7 @@ import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.StarBorder
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
@@ -86,6 +87,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -324,6 +326,13 @@ fun FmRoot(vm: FmViewModel) {
                 }
             },
         )
+    }
+
+    vm.pwdAsk?.let { a -> PasswordDialog(a, { vm.pwdAsk = null }) { pw -> vm.pwdAsk = null; a.onOk(pw) } }
+    vm.compressAsk?.let { list ->
+        CompressDialog(
+            if (list.size == 1) list[0].name else "${list.size} m\u1ee5c", { vm.compressAsk = null },
+        ) { fmt, level, pw -> vm.compressAsk = null; vm.doCompress(list, fmt, level, pw) }
     }
 
     vm.picker?.let { p -> FolderPicker(p.start, { vm.picker = null }) { vm.picker = null; p.onPick(it) } }
@@ -661,7 +670,7 @@ private fun ColumnScope.ItemMenuContent(
     val more = mutableListOf<Act>()
     if (isApk) more += Act(Icons.Default.Tune, "Sửa nhanh (Quick Edit)") { vm.startQuickEdit(item) }
     if (isBundle || dirHasApks) more += Act(Icons.Default.Layers, "Gộp split APK (Anti-split)") { vm.antiSplit(listOf(item)) }
-    more += Act(Icons.Default.Archive, "Nén (tar.zst)") { vm.compress(listOf(item)) }
+    more += Act(Icons.Default.Archive, "Nén…") { vm.compress(listOf(item)) }
     if (isArchive) {
         more += Act(Icons.Default.DriveFileMove, "Giải nén vào…") { vm.pickAndExtract(item, vm.panes[idx].path) }
         more += Act(Icons.Default.FolderZip, "Giải nén vào thư mục «${Archives.baseName(item.name)}»") { vm.extractNamed(item) }
@@ -751,6 +760,73 @@ private fun NameDialog(title: String, initial: String, onDismiss: () -> Unit, on
         text = { OutlinedTextField(text, { text = it }, singleLine = true) },
         confirmButton = { TextButton(onClick = { if (text.isNotBlank()) onOk(text.trim()) }) { Text("OK") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Hủy") } },
+    )
+}
+
+@Composable
+private fun PasswordField(value: String, onChange: (String) -> Unit, label: String, enabled: Boolean = true) {
+    var show by remember { mutableStateOf(false) }
+    OutlinedTextField(
+        value, onChange, singleLine = true, enabled = enabled, label = { Text(label) },
+        visualTransformation = if (show) VisualTransformation.None else PasswordVisualTransformation(),
+        trailingIcon = {
+            IconButton(onClick = { show = !show }, enabled = enabled) {
+                Icon(if (show) Icons.Default.VisibilityOff else Icons.Default.Visibility, null)
+            }
+        },
+    )
+}
+
+/** Asks for the password of an encrypted archive. */
+@Composable
+private fun PasswordDialog(ask: PwdAsk, onDismiss: () -> Unit, onOk: (CharArray) -> Unit) {
+    var pw by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Nh\u1eadp m\u1eadt kh\u1ea9u") },
+        text = {
+            Column {
+                Text(ask.label, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                if (ask.wrong) Text("Sai m\u1eadt kh\u1ea9u, th\u1eed l\u1ea1i.", color = MaterialTheme.colorScheme.error)
+                Spacer(Modifier.size(8.dp))
+                PasswordField(pw, { pw = it }, "M\u1eadt kh\u1ea9u")
+            }
+        },
+        confirmButton = { TextButton(onClick = { if (pw.isNotEmpty()) onOk(pw.toCharArray()) }) { Text("OK") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("H\u1ee7y") } },
+    )
+}
+
+/** Format + level (+ password for zip). Defaults: tar.zst, normal. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun CompressDialog(title: String, onDismiss: () -> Unit, onOk: (ArcFormat, ArcLevel, CharArray?) -> Unit) {
+    var fmt by remember { mutableStateOf(ArcFormat.TAR_ZST) }
+    var level by remember { mutableStateOf(ArcLevel.NORMAL) }
+    var pw by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("N\u00e9n: $title", maxLines = 2, overflow = TextOverflow.Ellipsis) },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("\u0110\u1ecbnh d\u1ea1ng")
+                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    ArcFormat.entries.forEach { f -> FilterChip(fmt == f, { fmt = f }, { Text(f.label) }) }
+                }
+                Text("M\u1ee9c n\u00e9n")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    ArcLevel.entries.forEach { l -> FilterChip(level == l, { level = l }, { Text(l.label) }) }
+                }
+                PasswordField(
+                    pw, { pw = it }, if (fmt.canPassword) "M\u1eadt kh\u1ea9u (AES-256, \u0111\u1ec3 tr\u1ed1ng = kh\u00f4ng)" else "M\u1eadt kh\u1ea9u: ch\u1ec9 d\u00f9ng v\u1edbi zip",
+                    enabled = fmt.canPassword,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onOk(fmt, level, if (fmt.canPassword && pw.isNotEmpty()) pw.toCharArray() else null) }) { Text("N\u00e9n") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("H\u1ee7y") } },
     )
 }
 

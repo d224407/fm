@@ -2,6 +2,20 @@ package com.example.fm
 
 import com.github.luben.zstd.ZstdInputStream
 import com.github.luben.zstd.ZstdOutputStream
+import net.lingala.zip4j.model.ZipParameters
+import net.lingala.zip4j.model.enums.AesKeyStrength
+import net.lingala.zip4j.model.enums.CompressionLevel
+import net.lingala.zip4j.model.enums.CompressionMethod
+import net.lingala.zip4j.model.enums.EncryptionMethod
+import net.lingala.zip4j.progress.ProgressMonitor
+import org.apache.commons.compress.PasswordRequiredException
+import org.apache.commons.compress.archivers.sevenz.SevenZMethod
+import org.apache.commons.compress.archivers.sevenz.SevenZMethodConfiguration
+import org.apache.commons.compress.archivers.sevenz.SevenZOutputFile
+import org.apache.commons.compress.compressors.gzip.GzipCompressorOutputStream
+import org.apache.commons.compress.compressors.gzip.GzipParameters
+import org.apache.commons.compress.compressors.xz.XZCompressorOutputStream
+import org.tukaani.xz.LZMA2Options
 import org.apache.commons.compress.archivers.ArchiveInputStream
 import org.apache.commons.compress.archivers.sevenz.SevenZFile
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry
@@ -17,7 +31,21 @@ import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.InputStream
 
-/** Compress: .tar.zst only. Extract: zstd, zip, 7z, tar, gz, xz, bz2. */
+/** The archive needs a password ([wrong] = a password was given but did not work). */
+class PasswordNeeded(val wrong: Boolean) : Exception(if (wrong) "Sai m\u1eadt kh\u1ea9u" else "C\u1ea7n m\u1eadt kh\u1ea9u")
+
+/** Output formats; only zip can be encrypted (AES-256). */
+enum class ArcFormat(val label: String, val ext: String, val canPassword: Boolean) {
+    TAR_ZST("tar.zst", ".tar.zst", false),
+    ZIP("zip", ".zip", true),
+    SEVEN_Z("7z", ".7z", false),
+    TAR_GZ("tar.gz", ".tar.gz", false),
+    TAR_XZ("tar.xz", ".tar.xz", false),
+}
+
+enum class ArcLevel(val label: String) { FAST("Nhanh"), NORMAL("Th\u01b0\u1eddng"), MAX("T\u1ed1i \u0111a") }
+
+/** Compress: tar.zst, zip (optional AES password), 7z, tar.gz, tar.xz. Extract: zstd, zip, 7z, tar, gz, xz, bz2. */
 object Archives {
     private val exts = listOf(
         ".tar.zst", ".tzst", ".zst", ".zip", ".apk", ".jar", ".7z", ".tar",
@@ -33,26 +61,20 @@ object Archives {
 
     fun isArchive(name: String) = exts.any { name.lowercase().endsWith(it) }
 
-    /** All [srcs] (same parent folder) go into one .tar.zst; returns the file written. */
-    fun compress(srcs: List<File>, level: Int = 3): File {
+    /** All [srcs] (same parent folder) go into one archive; returns the file written. */
+    fun compress(
+        srcs: List<File>, fmt: ArcFormat = ArcFormat.TAR_ZST, level: ArcLevel = ArcLevel.NORMAL, password: CharArray? = null,
+    ): File {
         val base = srcs.first().parentFile ?: File("/")
         val stem = if (srcs.size == 1) srcs[0].name else base.name.ifEmpty { "archive" }
-        var out = File(base, "$stem.tar.zst")
+        var out = File(base, "$stem${fmt.ext}")
         var n = 1
-        while (out.exists()) out = File(base, "$stem (${n++}).tar.zst")
+        while (out.exists()) out = File(base, "$stem (${n++})${fmt.ext}")
         try {
-            val zs = ZstdOutputStream(FileOutputStream(out).buffered(256 * 1024), level)
-            // multithreaded compression when the native lib supports it
-            runCatching { zs.setWorkers(Runtime.getRuntime().availableProcessors().coerceIn(1, 8)) }
-            TarArchiveOutputStream(zs).use { tar ->
-                tar.setLongFileMode(TarArchiveOutputStream.LONGFILE_POSIX)
-                tar.setBigNumberMode(TarArchiveOutputStream.BIGNUMBER_POSIX)
-                for (src in srcs) src.walkTopDown().forEach { f ->
-                    Work.check()
-                    tar.putArchiveEntry(TarArchiveEntry(f, f.relativeTo(base).path))
-                    if (f.isFile) f.inputStream().use { Work.copy(it, tar) }
-                    tar.closeArchiveEntry()
-                }
+            when (fmt) {
+                ArcFormat.ZIP -> writeZip(srcs, base, out, level, password)
+                ArcFormat.SEVEN_Z -> write7z(srcs, base, out, level)
+                else -> writeTar(srcs, base, out, fmt, level)
             }
         } catch (t: Throwable) {
             out.delete()
@@ -61,24 +83,128 @@ object Archives {
         return out
     }
 
-    fun extract(archive: File, dest: File) {
+    // xz/lzma presets stay at or below 6: preset 9 needs ~670 MB of heap, too much for a phone
+    private fun xzPreset(l: ArcLevel) = when (l) { ArcLevel.FAST -> 1; ArcLevel.NORMAL -> 4; ArcLevel.MAX -> 6 }
+
+    private fun writeTar(srcs: List<File>, base: File, out: File, fmt: ArcFormat, level: ArcLevel) {
+        val fos = FileOutputStream(out).buffered(256 * 1024)
+        val comp: java.io.OutputStream = when (fmt) {
+            ArcFormat.TAR_GZ -> GzipCompressorOutputStream(fos, GzipParameters().also {
+                it.setCompressionLevel(when (level) { ArcLevel.FAST -> 1; ArcLevel.NORMAL -> 6; ArcLevel.MAX -> 9 })
+            })
+            ArcFormat.TAR_XZ -> XZCompressorOutputStream(fos, xzPreset(level))
+            else -> {
+                val zl = when (level) { ArcLevel.FAST -> 1; ArcLevel.NORMAL -> 3; ArcLevel.MAX -> 19 }
+                val zs = ZstdOutputStream(fos, zl)
+                // multithreaded compression when the native lib supports it (fewer workers at max level: memory)
+                val w = Runtime.getRuntime().availableProcessors().coerceIn(1, if (level == ArcLevel.MAX) 4 else 8)
+                runCatching { zs.setWorkers(w) }
+                zs
+            }
+        }
+        TarArchiveOutputStream(comp).use { tar ->
+            tar.setLongFileMode(TarArchiveOutputStream.LONGFILE_POSIX)
+            tar.setBigNumberMode(TarArchiveOutputStream.BIGNUMBER_POSIX)
+            for (src in srcs) src.walkTopDown().forEach { f ->
+                Work.check()
+                tar.putArchiveEntry(TarArchiveEntry(f, f.relativeTo(base).path))
+                if (f.isFile) f.inputStream().use { Work.copy(it, tar) }
+                tar.closeArchiveEntry()
+            }
+        }
+    }
+
+    private fun write7z(srcs: List<File>, base: File, out: File, level: ArcLevel) {
+        SevenZOutputFile(out).use { z ->
+            z.setContentMethods(listOf(SevenZMethodConfiguration(SevenZMethod.LZMA2, LZMA2Options(xzPreset(level)))))
+            val buf = ByteArray(256 * 1024)
+            for (src in srcs) src.walkTopDown().forEach { f ->
+                Work.check()
+                z.putArchiveEntry(z.createArchiveEntry(f, f.relativeTo(base).path))
+                if (f.isFile) f.inputStream().use { i ->
+                    while (true) { Work.check(); val r = i.read(buf); if (r < 0) break; z.write(buf, 0, r) }
+                }
+                z.closeArchiveEntry()
+            }
+            z.finish()
+        }
+    }
+
+    private fun writeZip(srcs: List<File>, base: File, out: File, level: ArcLevel, password: CharArray?) {
+        val enc = password != null && password.isNotEmpty()
+        val zf = if (enc) net.lingala.zip4j.ZipFile(out, password) else net.lingala.zip4j.ZipFile(out)
+        try {
+            val p = ZipParameters()
+            p.setCompressionMethod(CompressionMethod.DEFLATE)
+            p.setCompressionLevel(when (level) {
+                ArcLevel.FAST -> CompressionLevel.FASTEST
+                ArcLevel.NORMAL -> CompressionLevel.NORMAL
+                ArcLevel.MAX -> CompressionLevel.MAXIMUM
+            })
+            if (enc) {
+                p.setEncryptFiles(true)
+                p.setEncryptionMethod(EncryptionMethod.AES)
+                p.setAesKeyStrength(AesKeyStrength.KEY_STRENGTH_256)
+            }
+            zf.setRunInThread(true)
+            for (src in srcs) {
+                Work.check()
+                if (src.isDirectory) zf.addFolder(src, p)
+                else zf.addFile(src, ZipParameters(p).also { it.setFileNameInZip(src.name) })
+                awaitZip(zf)
+            }
+        } finally {
+            zf.close()
+        }
+    }
+
+    /** Waits for a zip4j background task, forwarding Back (cancel) and errors. */
+    private fun awaitZip(zf: net.lingala.zip4j.ZipFile) {
+        val pm = zf.getProgressMonitor()
+        while (pm.getState() == ProgressMonitor.State.BUSY) {
+            if (Work.cancelled) pm.cancelAllTasks()
+            Thread.sleep(50)
+        }
+        when (pm.getResult()) {
+            ProgressMonitor.Result.ERROR -> throw pm.getException() ?: java.io.IOException("zip error")
+            ProgressMonitor.Result.CANCELLED -> throw java.util.concurrent.CancellationException("cancelled")
+            else -> {}
+        }
+    }
+
+    /** zip4j reads both plain and encrypted (ZipCrypto / AES) zips. */
+    private fun unzipWithPassword(zip: File, dest: File, password: CharArray) {
+        val zf = net.lingala.zip4j.ZipFile(zip, password)
+        try {
+            zf.setRunInThread(true)
+            zf.extractAll(dest.path)
+            try {
+                awaitZip(zf)
+            } catch (e: net.lingala.zip4j.exception.ZipException) {
+                if (e.getType() == net.lingala.zip4j.exception.ZipException.Type.WRONG_PASSWORD) throw PasswordNeeded(true)
+                throw e
+            }
+        } finally {
+            zf.close()
+        }
+    }
+
+    fun extract(archive: File, dest: File, password: CharArray? = null) {
         dest.mkdirs()
         val n = archive.name.lowercase()
         when {
-            n.endsWith(".7z") -> SevenZFile(archive).use { z ->
-                val buf = ByteArray(256 * 1024)
-                while (true) {
-                    val e = z.nextEntry ?: break
-                    val t = safe(dest, e.name)
-                    if (e.isDirectory) t.mkdirs() else {
-                        t.parentFile?.mkdirs()
-                        t.outputStream().use { o ->
-                            while (true) { Work.check(); val r = z.read(buf); if (r < 0) break; o.write(buf, 0, r) }
-                        }
-                    }
+            n.endsWith(".7z") -> extract7z(archive, dest, password)
+            n.endsWith(".zip") || n.endsWith(".apk") || n.endsWith(".jar") -> {
+                if (password != null) unzipWithPassword(archive, dest, password)
+                else try {
+                    unzip(archive, dest)
+                } catch (e: java.util.zip.ZipException) {
+                    // java.util.zip / Android's ZipFile reject encrypted entries (message differs per runtime)
+                    val enc = runCatching { net.lingala.zip4j.ZipFile(archive).use { it.isEncrypted() } }.getOrDefault(false)
+                    if (enc) throw PasswordNeeded(false)
+                    throw e
                 }
             }
-            n.endsWith(".zip") || n.endsWith(".apk") || n.endsWith(".jar") -> unzip(archive, dest)
             else -> {
                 val raw = BufferedInputStream(FileInputStream(archive), 256 * 1024)
                 val dec: InputStream = when {
@@ -94,6 +220,32 @@ object Archives {
                     else File(dest, archive.name.substringBeforeLast('.')).outputStream().use { Work.copy(s, it) }
                 }
             }
+        }
+    }
+
+    private fun extract7z(archive: File, dest: File, password: CharArray?) {
+        try {
+            @Suppress("DEPRECATION")
+            val sz = if (password != null) SevenZFile(archive, password) else SevenZFile(archive)
+            sz.use { z ->
+                val buf = ByteArray(256 * 1024)
+                while (true) {
+                    val e = z.nextEntry ?: break
+                    val t = safe(dest, e.name)
+                    if (e.isDirectory) t.mkdirs() else {
+                        t.parentFile?.mkdirs()
+                        t.outputStream().use { o ->
+                            while (true) { Work.check(); val r = z.read(buf); if (r < 0) break; o.write(buf, 0, r) }
+                        }
+                    }
+                }
+            }
+        } catch (e: PasswordRequiredException) {
+            throw PasswordNeeded(false)
+        } catch (e: java.io.IOException) {
+            // wrong key -> garbage after decryption -> decoder/CRC errors
+            if (password != null) throw PasswordNeeded(true)
+            throw e
         }
     }
 

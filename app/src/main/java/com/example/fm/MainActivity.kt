@@ -20,11 +20,17 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalViewConfiguration
+import androidx.compose.ui.platform.ViewConfiguration
+
+private const val LONG_PRESS_MS = 250L
 
 class MainActivity : ComponentActivity() {
     private val vm: FmViewModel by viewModels()
@@ -48,6 +54,14 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         checkAccess()
         setContent {
+            // Long-press (select / context menu) fires sooner than the system default (~500 ms)
+            val base = LocalViewConfiguration.current
+            val quick = remember(base) {
+                object : ViewConfiguration by base {
+                    override val longPressTimeoutMillis: Long get() = LONG_PRESS_MS
+                }
+            }
+            CompositionLocalProvider(LocalViewConfiguration provides quick) {
             FmTheme {
                 if (granted) FmRoot(vm) else Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
                     Column(
@@ -59,6 +73,7 @@ class MainActivity : ComponentActivity() {
                         Button(onClick = ::requestAccess) { Text("Cấp quyền") }
                     }
                 }
+            }
             }
         }
     }
