@@ -11,6 +11,22 @@ object Places {
 
     fun isStorage(path: String) = path == "/" || path == sd
 
+    private val storageRoot = Regex("/storage/emulated/\\d+|/storage/[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}|/data/media/\\d+")
+    private val pkgName = Regex("[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z0-9_]+)+")
+
+    /** Root of a real shared-storage volume (not a folder inside an extracted archive). */
+    fun isStorageRoot(p: String) = p == sd || p == "/sdcard" || storageRoot.matches(p)
+
+    /** Package name for Android/{data,obb,media}/<pkg> on a storage volume, else null. */
+    fun pkgOf(path: String): String? {
+        val f = File(path)
+        val t = f.parentFile ?: return null
+        val a = t.parentFile ?: return null
+        if (a.name != "Android" || t.name !in setOf("data", "obb", "media")) return null
+        if (!isStorageRoot(a.parent ?: return null)) return null
+        return f.name.takeIf { pkgName.matches(it) }
+    }
+
     fun title(path: String): String = when (path) {
         "/" -> "Thư mục gốc"
         sd -> "Bộ nhớ thiết bị"

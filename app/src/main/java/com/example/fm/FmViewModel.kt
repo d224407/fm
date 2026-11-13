@@ -323,6 +323,23 @@ class FmViewModel(private val app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** Integrity test: reads every entry and reports OK or the first error. */
+    fun testArchive(item: FItem, pw: CharArray? = null): Unit = run {
+        val title = "Kiểm tra: ${item.name}"
+        try {
+            val r = Archives.test(File(item.path), pw)
+            output = title to "✔ Không phát hiện lỗi\n${r.files} tệp · ${android.text.format.Formatter.formatFileSize(app, r.bytes)} sau giải nén"
+        } catch (e: PasswordNeeded) {
+            askPassword(item.name, e.wrong) { testArchive(item, it) }
+        } catch (e: java.util.concurrent.CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            DLog.e("test archive failed", e)
+            output = title to "✘ Lỗi / file hỏng\n${e.chain()}"
+        }
+        Unit
+    }
+
     fun extractHere(item: FItem) = extractTo(item, File(item.path).parentFile ?: File("/"))
 
     fun extractNamed(item: FItem) {

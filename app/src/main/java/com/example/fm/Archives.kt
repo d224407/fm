@@ -220,6 +220,116 @@ object Archives {
         }
     }
 
+    /** Result of [test]: number of files read and their total unpacked size. */
+    class TestResult(val files: Int, val bytes: Long)
+
+    /** Reads every entry to the end so CRC / MAC / stream checks run. Throws on corruption or a bad password. */
+    fun test(archive: File, password: CharArray? = null): TestResult {
+        val n = archive.name.lowercase()
+        var files = 0
+        var bytes = 0L
+        val buf = ByteArray(256 * 1024)
+        fun drain(s: InputStream, crc: java.util.zip.CRC32? = null): Long {
+            var t = 0L
+            while (true) {
+                Work.check()
+                val r = s.read(buf)
+                if (r < 0) break
+                crc?.update(buf, 0, r)
+                t += r
+            }
+            return t
+        }
+        when {
+            n.endsWith(".7z") -> try {
+                @Suppress("DEPRECATION")
+                val sz = if (password != null) SevenZFile(archive, password) else SevenZFile(archive)
+                sz.use { z ->
+                    while (true) {
+                        val e = z.nextEntry ?: break
+                        if (e.isDirectory) continue
+                        while (true) { Work.check(); val r = z.read(buf); if (r < 0) break; bytes += r }
+                        files++
+                    }
+                }
+            } catch (e: PasswordRequiredException) {
+                throw PasswordNeeded(false)
+            } catch (e: java.io.IOException) {
+                if (password != null) throw PasswordNeeded(true)
+                throw e
+            }
+            n.endsWith(".zip") || n.endsWith(".apk") || n.endsWith(".jar") -> {
+                val enc = runCatching { net.lingala.zip4j.ZipFile(archive).use { it.isEncrypted() } }.getOrDefault(false)
+                if (enc) {
+                    if (password == null) throw PasswordNeeded(false)
+                    val zf = net.lingala.zip4j.ZipFile(archive, password)
+                    try {
+                        for (h in zf.getFileHeaders()) {
+                            Work.check()
+                            if (h.isDirectory()) continue
+                            try {
+                                zf.getInputStream(h).use { bytes += drain(it) }
+                            } catch (e: net.lingala.zip4j.exception.ZipException) {
+                                if (e.getType() == net.lingala.zip4j.exception.ZipException.Type.WRONG_PASSWORD) throw PasswordNeeded(true)
+                                throw java.io.IOException("${h.getFileName()}: ${e.message}", e)
+                            }
+                            files++
+                        }
+                    } finally {
+                        zf.close()
+                    }
+                } else {
+                    // java.util.zip.ZipFile does not verify CRC itself, so compare it by hand
+                    ZipFile(archive).use { z ->
+                        for (e in z.entries()) {
+                            Work.check()
+                            if (e.isDirectory) continue
+                            val crc = java.util.zip.CRC32()
+                            val len = try {
+                                z.getInputStream(e).use { drain(it, crc) }
+                            } catch (x: java.io.IOException) {
+                                throw java.io.IOException("${e.name}: ${x.message}", x)
+                            }
+                            if (e.size >= 0 && len != e.size) throw java.io.IOException("${e.name}: sai kích thước ($len/${e.size})")
+                            if (e.crc >= 0 && crc.value != e.crc) throw java.io.IOException("${e.name}: sai CRC")
+                            bytes += len
+                            files++
+                        }
+                    }
+                }
+            }
+            else -> {
+                val raw = BufferedInputStream(FileInputStream(archive), 256 * 1024)
+                val dec: InputStream = when {
+                    n.endsWith(".zst") || n.endsWith(".tzst") -> ZstdInputStream(raw)
+                    n.endsWith(".gz") || n.endsWith(".tgz") -> GzipCompressorInputStream(raw)
+                    n.endsWith(".xz") || n.endsWith(".txz") -> XZCompressorInputStream(raw)
+                    n.endsWith(".bz2") || n.endsWith(".tbz2") -> BZip2CompressorInputStream(raw)
+                    else -> raw
+                }
+                val isTar = n.endsWith(".tar") || n.contains(".tar.") || listOf(".tgz", ".tzst", ".txz", ".tbz2").any { n.endsWith(it) }
+                dec.use { s ->
+                    if (isTar) {
+                        TarArchiveInputStream(s).let { t ->
+                            while (true) {
+                                Work.check()
+                                val e = t.nextEntry ?: break
+                                if (e.isDirectory) continue
+                                bytes += drain(t)
+                                files++
+                            }
+                        }
+                        drain(s) // read to the very end so the gzip / xz / zstd trailer is verified too
+                    } else {
+                        bytes += drain(s)
+                        files = 1
+                    }
+                }
+            }
+        }
+        return TestResult(files, bytes)
+    }
+
     private fun extract7z(archive: File, dest: File, password: CharArray?) {
         try {
             @Suppress("DEPRECATION")

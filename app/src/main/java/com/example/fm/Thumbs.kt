@@ -39,6 +39,31 @@ object Thumbs {
 
     fun supports(name: String) = kind(name) != null
 
+    /** App icon + label of an installed package; [icon] and [label] are null when not installed. */
+    class PkgMeta(val icon: ImageBitmap?, val label: String?)
+
+    private val pkgCache = LruCache<String, PkgMeta>(400)
+
+    fun pkgPeek(pkg: String): PkgMeta? = pkgCache.get(pkg)
+
+    /** Blocking; call off the main thread. */
+    fun pkg(ctx: Context, pkg: String, px: Int = 96): PkgMeta {
+        pkgCache.get(pkg)?.let { return it }
+        val m = try {
+            val pm = ctx.packageManager
+            val ai = pm.getApplicationInfo(pkg, 0)
+            val d = pm.getApplicationIcon(ai)
+            val bmp = Bitmap.createBitmap(px, px, Bitmap.Config.ARGB_8888)
+            d.setBounds(0, 0, px, px)
+            d.draw(Canvas(bmp))
+            PkgMeta(bmp.asImageBitmap(), pm.getApplicationLabel(ai).toString())
+        } catch (_: Throwable) {
+            PkgMeta(null, null)
+        }
+        pkgCache.put(pkg, m)
+        return m
+    }
+
     private fun key(i: FItem) = "${i.path}|${i.size}|${i.modified}"
 
     fun peek(i: FItem): ImageBitmap? = cache.get(key(i))?.asImageBitmap()

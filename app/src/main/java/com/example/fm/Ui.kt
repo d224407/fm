@@ -14,6 +14,9 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -43,6 +46,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.StarBorder
@@ -60,6 +64,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.PrimaryTabRow
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
@@ -73,17 +78,26 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.PointerInputChange
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -93,6 +107,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.unit.toSize
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -125,8 +140,8 @@ internal fun copyText(ctx: Context, text: String) {
 
 /** ADB-style grouped list: big outer corners (24dp), small inner corners (4dp). */
 private fun groupShape(i: Int, n: Int): Shape {
-    val big = 24.dp
-    val small = 4.dp
+    val big = 18.dp
+    val small = 3.dp
     return when {
         n == 1 -> RoundedCornerShape(big)
         i == 0 -> RoundedCornerShape(big, big, small, small)
@@ -135,12 +150,15 @@ private fun groupShape(i: Int, n: Int): Shape {
     }
 }
 
-/** Glyph for well-known folders; [path] lets us tell /data from Android/data. */
+/**
+ * Glyph for well-known folders. Matches full paths, so a folder that merely has the same name
+ * (e.g. "data" at the root of a zip) never gets a system icon.
+ */
 private fun folderGlyph(path: String): ImageVector? {
     val f = File(path)
     val name = f.name.lowercase()
-    val parent = f.parentFile?.name?.lowercase() ?: ""
-    if (f.parent == "/") when (name) {
+    val parent = f.parent ?: return null
+    if (parent == "/") when (name) {
         "system" -> return Icons.Default.Settings
         "data" -> return Icons.Default.Storage
         "sdcard", "storage" -> return Icons.Default.SdCard
@@ -157,10 +175,14 @@ private fun folderGlyph(path: String): ImageVector? {
         "acct", "config", "debug_ramdisk" -> return Icons.Default.Settings
         "metadata", "linkerconfig" -> return Icons.Default.Info
     }
-    if (parent == "android") when (name) {
-        "data" -> return Icons.Default.Storage
-        "obb" -> return Icons.Default.Inventory2
-        "media" -> return Icons.Default.PermMedia
+    if (!Places.isStorageRoot(parent)) {
+        val pp = f.parentFile?.parent
+        if (f.parentFile?.name == "Android" && pp != null && Places.isStorageRoot(pp)) when (name) {
+            "data" -> return Icons.Default.Storage
+            "obb" -> return Icons.Default.Inventory2
+            "media" -> return Icons.Default.PermMedia
+        }
+        return null
     }
     return when (name) {
         "download", "downloads" -> Icons.Default.Download
@@ -178,6 +200,16 @@ private fun folderGlyph(path: String): ImageVector? {
         "screenshots" -> Icons.Default.PhoneAndroid
         "audiobooks" -> Icons.Default.Headphones
         else -> null
+    }
+}
+
+/** Folder that looks like a split-APK set (base.apk / split_* / config.*), not just any folder holding APKs. */
+private fun isSplitApkDir(dir: File): Boolean {
+    val apks = dir.list { _, n -> n.lowercase().endsWith(".apk") } ?: return false
+    if (apks.size < 2) return false
+    return apks.any { n ->
+        val l = n.lowercase()
+        l == "base.apk" || l.endsWith("-base.apk") || l.startsWith("split_") || l.startsWith("config.") || ".config." in l
     }
 }
 
@@ -231,20 +263,17 @@ private fun SmallChip(text: String) {
 
 @Composable
 private fun Pill(
-    text: String, icon: ImageVector, modifier: Modifier = Modifier,
+    icon: ImageVector, desc: String, modifier: Modifier = Modifier,
     danger: Boolean = false, onClick: () -> Unit,
 ) {
     val cs = MaterialTheme.colorScheme
     val bg = if (danger) cs.errorContainer else cs.secondaryContainer
     val fg = if (danger) cs.onErrorContainer else cs.onSecondaryContainer
-    Row(
-        modifier.heightIn(min = 48.dp).clip(RoundedCornerShape(24.dp)).background(bg)
-            .clickable(onClick = onClick).padding(horizontal = 12.dp),
-        horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically,
+    Box(
+        modifier.heightIn(min = 44.dp).clip(RoundedCornerShape(22.dp)).background(bg).clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
     ) {
-        Icon(icon, null, tint = fg, modifier = Modifier.size(20.dp))
-        Spacer(Modifier.width(6.dp))
-        Text(text, color = fg, fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1)
+        Icon(icon, desc, tint = fg, modifier = Modifier.size(22.dp))
     }
 }
 
@@ -372,17 +401,20 @@ fun PaneScreen(vm: FmViewModel, idx: Int) {
 
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize()) {
+            val hasParent = pane.path != "/"
+            val total = pane.items.size + if (hasParent) 1 else 0
+            // ".." is pinned above the list (not a lazy item) so it can never be left blank
+            if (hasParent) {
+                Box(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 6.dp, bottom = 1.dp)) {
+                    ParentRow(groupShape(0, total), { vm.up(idx) }, { vm.selectAll(idx) })
+                }
+            }
             LazyColumn(
                 Modifier.weight(1f).fillMaxWidth(),
                 state = listState,
-                contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 88.dp),
-                verticalArrangement = Arrangement.spacedBy(2.dp),
+                contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = if (hasParent) 0.dp else 6.dp, bottom = 88.dp),
+                verticalArrangement = Arrangement.spacedBy(1.dp),
             ) {
-                val hasParent = pane.path != "/"
-                val total = pane.items.size + if (hasParent) 1 else 0
-                if (hasParent) {
-                    item(key = "..") { ParentRow(groupShape(0, total), { vm.up(idx) }, { vm.selectAll(idx) }) }
-                }
                 itemsIndexed(pane.items, key = { _, it -> it.path }) { i, it ->
                     FileEntry(
                         vm, idx, it, groupShape(if (hasParent) i + 1 else i, total),
@@ -404,12 +436,12 @@ fun PaneScreen(vm: FmViewModel, idx: Int) {
                 Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 6.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Pill("Chép", Icons.Default.ContentCopy, Modifier.weight(1f)) { vm.copy(idx, vm.selectedItems(idx)) }
-                Pill("Cắt", Icons.Default.ContentCut, Modifier.weight(1f)) { vm.cut(idx, vm.selectedItems(idx)) }
-                Pill("Nén", Icons.Default.Archive, Modifier.weight(1f)) { vm.compress(vm.selectedItems(idx)) }
-                Pill("Xóa", Icons.Default.Delete, Modifier.weight(1f), danger = true) { vm.delete(vm.selectedItems(idx)) }
+                Pill(Icons.Default.ContentCopy, "Chép", Modifier.weight(1f)) { vm.copy(idx, vm.selectedItems(idx)) }
+                Pill(Icons.Default.ContentCut, "Cắt", Modifier.weight(1f)) { vm.cut(idx, vm.selectedItems(idx)) }
+                Pill(Icons.Default.Archive, "Nén", Modifier.weight(1f)) { vm.compress(vm.selectedItems(idx)) }
+                Pill(Icons.Default.Delete, "Xóa", Modifier.weight(1f), danger = true) { vm.delete(vm.selectedItems(idx)) }
                 Box(Modifier.weight(1f)) {
-                    Pill("Thêm", Icons.Default.MoreHoriz, Modifier.fillMaxWidth()) { moreMenu = true }
+                    Pill(Icons.Default.MoreHoriz, "Thêm", Modifier.fillMaxWidth()) { moreMenu = true }
                     DropdownMenu(
                         expanded = moreMenu, onDismissRequest = { moreMenu = false },
                         modifier = Modifier.widthIn(min = 240.dp), shape = RoundedCornerShape(20.dp), containerColor = MenuBg,
@@ -418,6 +450,9 @@ fun PaneScreen(vm: FmViewModel, idx: Int) {
                         if (sel.size == 1) MenuRow(Icons.Default.Info, "Thuộc tính", MenuAccent) { moreMenu = false; vm.propsItem = sel[0] }
                         if (sel.size == 1 && !sel[0].isDir) {
                             MenuRow(Icons.Default.Edit, "Mở bằng trình soạn thảo", MenuAccent) { moreMenu = false; vm.editing = sel[0] }
+                        }
+                        if (sel.size == 1 && !sel[0].isDir && Archives.isArchive(sel[0].name)) {
+                            MenuRow(Icons.Default.VerifiedUser, "Kiểm tra (Test)", MenuAccent) { moreMenu = false; vm.testArchive(sel[0]) }
                         }
                         if (sel.size >= 2) {
                             MenuRow(Icons.Default.DriveFileRenameOutline, "Đổi tên hàng loạt", MenuAccent) { moreMenu = false; vm.batch = sel }
@@ -439,7 +474,7 @@ fun PaneScreen(vm: FmViewModel, idx: Int) {
                 if (selecting) {
                     BarIcon(Icons.Default.Close, "Bỏ chọn") { vm.clearSelection(idx) }
                     Text(
-                        "${pane.selected.size} đã chọn", Modifier.weight(1f).padding(start = 6.dp),
+                        "${pane.selected.size}", Modifier.weight(1f).padding(start = 6.dp),
                         color = cs.onPrimaryContainer, fontSize = 16.sp, fontWeight = FontWeight.Medium,
                     )
                     BarIcon(Icons.Default.SelectAll, "Chọn tất cả") { vm.selectAll(idx) }
@@ -472,10 +507,6 @@ fun PaneScreen(vm: FmViewModel, idx: Int) {
                             }
                         }
                     }
-                    val clip = vm.clip
-                    if (clip != null && pane.archive == null) {
-                        BarIcon(Icons.Default.ContentPaste, "Dán ${clip.items.size}") { vm.paste(idx) }
-                    }
                     if (DLog.enabled) BarIcon(Icons.Default.BugReport, "Log") { vm.showLog = true }
                     BarIcon(Icons.Default.ContentCopy, "Sao chép địa chỉ") { copyText(ctx, vm.displayPath(idx)) }
                     if (pane.archive == null) {
@@ -491,7 +522,20 @@ fun PaneScreen(vm: FmViewModel, idx: Int) {
 
         if (!selecting && pane.archive == null) {
             val root = pane.gitRoot
-            Box(Modifier.align(Alignment.BottomEnd).padding(start = 16.dp, end = 16.dp, bottom = 88.dp)) {
+            val clip = vm.clip
+            Column(
+                Modifier.align(Alignment.BottomEnd).padding(start = 16.dp, end = 16.dp, bottom = 88.dp),
+                horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                if (clip != null) {
+                    SmallFloatingActionButton(
+                        onClick = { vm.paste(idx) },
+                        modifier = Modifier.padding(end = 8.dp),
+                        shape = RoundedCornerShape(14.dp),
+                        containerColor = cs.secondaryContainer, contentColor = cs.onSecondaryContainer,
+                    ) { Icon(Icons.Default.ContentPaste, "Dán ${clip.items.size}") }
+                }
+                Box {
                 FloatingActionButton(
                     onClick = { gitMenu = !gitMenu },
                     shape = RoundedCornerShape(20.dp),
@@ -515,6 +559,7 @@ fun PaneScreen(vm: FmViewModel, idx: Int) {
                     if (root == null) MenuRow(Icons.Default.Source, "Git init", MenuAccent) { go { vm.gitInit(idx) } }
                     MenuRow(Icons.Default.CloudDownload, "Git clone", MenuAccent) { go { cloneDlg = true } }
                 }
+                }
             }
         }
     }
@@ -534,83 +579,183 @@ fun PaneScreen(vm: FmViewModel, idx: Int) {
     }
 }
 
-/** A list row plus its long-press drop-down menu. */
+/**
+ * Menu state shared by the row's touch handler and the menu rows. All rectangles are in screen
+ * coordinates, because the menu lives in its own popup window.
+ */
+private class MenuDrag {
+    val bounds = HashMap<Int, Rect>()
+    var acts: List<Act> = emptyList()
+    var hover by mutableIntStateOf(-1)
+    var expanded by mutableStateOf(false)
+    var dragged = false
+    var start = Offset.Zero
+    fun at(p: Offset): Int = bounds.entries.firstOrNull { it.value.contains(p) }?.key ?: -1
+    fun reset() { hover = -1; expanded = false; dragged = false; bounds.clear() }
+}
+
+/**
+ * Row touch handling. [onTap] gets the position inside the row; [onLong], [onMove] and [onRelease]
+ * get screen positions and keep firing while the finger stays down after the long-press, even
+ * outside the row (used to pick an item of the menu that the long-press opened).
+ */
+@Composable
+private fun Modifier.touchRow(
+    onPress: (Boolean) -> Unit,
+    onTap: (Offset) -> Unit,
+    onLong: (Offset) -> Unit,
+    onMove: (Offset) -> Unit = {},
+    onRelease: (Offset) -> Unit = {},
+): Modifier {
+    val press = rememberUpdatedState(onPress)
+    val tap = rememberUpdatedState(onTap)
+    val long = rememberUpdatedState(onLong)
+    val move = rememberUpdatedState(onMove)
+    val release = rememberUpdatedState(onRelease)
+    var coords by remember { mutableStateOf<LayoutCoordinates?>(null) }
+    return this
+        .onGloballyPositioned { coords = it }
+        .pointerInput(Unit) {
+            awaitEachGesture {
+                val down = awaitFirstDown(requireUnconsumed = false)
+                fun screen(p: Offset): Offset = coords?.takeIf { it.isAttached }?.localToScreen(p) ?: p
+                press.value(true)
+                var up: PointerInputChange? = null
+                var finished = false
+                withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) {
+                    up = waitForUpOrCancellation()
+                    finished = true
+                }
+                if (finished) {
+                    press.value(false)
+                    up?.let { it.consume(); tap.value(it.position) }
+                    return@awaitEachGesture
+                }
+                long.value(screen(down.position))
+                while (true) {
+                    val c = awaitPointerEvent().changes.firstOrNull { it.id == down.id } ?: break
+                    c.consume()
+                    if (!c.pressed) { release.value(screen(c.position)); break }
+                    move.value(screen(c.position))
+                }
+                press.value(false)
+            }
+        }
+}
+
+/**
+ * A list row plus its context menu. Tap on a file opens the menu (folders open); long-press opens
+ * it too, and while the finger is still down it can slide over the menu: the item under it is
+ * highlighted, hovering "Thêm…" expands it, and lifting the finger runs the highlighted item.
+ */
 @Composable
 private fun FileEntry(
     vm: FmViewModel, idx: Int, item: FItem, shape: Shape,
     selected: Boolean, selecting: Boolean, onRename: () -> Unit,
 ) {
     var menu by remember { mutableStateOf(false) }
+    val d = remember { MenuDrag() }
+    val slop = with(LocalDensity.current) { 14.dp.toPx() }
+    fun close() { menu = false; d.reset() }
     Box(Modifier.fillMaxWidth()) {
         FileRow(
             item, shape, selected,
-            onClick = { vm.open(idx, item) },
-            onLong = { if (selecting) vm.toggleSelect(idx, item) else menu = true },
-            onIcon = { vm.toggleSelect(idx, item) },
+            onTap = { inIcon ->
+                when {
+                    inIcon || selecting -> vm.toggleSelect(idx, item)
+                    item.isDir -> vm.open(idx, item)
+                    else -> { d.reset(); menu = true }
+                }
+            },
+            onLong = { p ->
+                if (selecting) vm.toggleSelect(idx, item) else { d.reset(); d.start = p; menu = true }
+            },
+            onMove = { p ->
+                if (menu) {
+                    if (!d.dragged && (p - d.start).getDistance() > slop) d.dragged = true
+                    if (d.dragged) {
+                        val i = d.at(p)
+                        d.hover = i
+                        if (i >= 0 && d.acts.getOrNull(i)?.keepOpen == true) d.expanded = true
+                    }
+                }
+            },
+            onRelease = { p ->
+                if (menu && d.dragged) {
+                    val a = d.acts.getOrNull(d.at(p))
+                    d.hover = -1
+                    if (a != null && !a.keepOpen) { close(); a.run() }
+                }
+            },
         )
         DropdownMenu(
-            expanded = menu, onDismissRequest = { menu = false },
+            expanded = menu, onDismissRequest = { close() },
             modifier = Modifier.widthIn(min = 240.dp, max = 300.dp),
             shape = RoundedCornerShape(20.dp), containerColor = MenuBg,
         ) {
-            ItemMenuContent(vm, idx, item, close = { menu = false }, onRename = onRename)
+            ItemMenuContent(vm, idx, item, d, close = { close() }, onRename = onRename)
         }
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun FileRow(
     item: FItem, shape: Shape, selected: Boolean,
-    onClick: () -> Unit, onLong: () -> Unit, onIcon: () -> Unit,
+    onTap: (Boolean) -> Unit, onLong: (Offset) -> Unit, onMove: (Offset) -> Unit, onRelease: (Offset) -> Unit,
 ) {
     val cs = MaterialTheme.colorScheme
     val ctx = LocalContext.current
+    val iconZone = with(LocalDensity.current) { 58.dp.toPx() }
+    var pressed by remember { mutableStateOf(false) }
+    // Android/{data,obb,media}/<package>: show the app's icon and name
+    val pkg = remember(item.path) { if (item.isDir) Places.pkgOf(item.path) else null }
+    val meta by produceState<Thumbs.PkgMeta?>(pkg?.let { Thumbs.pkgPeek(it) }, pkg) {
+        if (pkg != null && value == null) value = withContext(Thumbs.dispatcher) { Thumbs.pkg(ctx.applicationContext, pkg) }
+    }
+    val base = if (selected) cs.primaryContainer else cs.surfaceContainerHighest
     val nameColor = if (selected) cs.onPrimaryContainer else cs.onSurface
     val descColor = if (selected) cs.onPrimaryContainer else cs.onSurfaceVariant
     Row(
-        Modifier.fillMaxWidth().clip(shape)
-            .background(if (selected) cs.primaryContainer else cs.surfaceContainerHighest)
-            .combinedClickable(onClick = onClick, onLongClick = onLong)
-            .heightIn(min = 56.dp).padding(start = 12.dp, end = 18.dp, top = 8.dp, bottom = 8.dp),
+        Modifier.fillMaxWidth()
+            .background(if (pressed) lerp(base, cs.onSurface, 0.1f) else base, shape)
+            .touchRow({ pressed = it }, { p -> onTap(p.x < iconZone) }, onLong, onMove, onRelease)
+            .heightIn(min = 44.dp).padding(start = 10.dp, end = 14.dp, top = 5.dp, bottom = 5.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Box(
-            Modifier.size(40.dp).clip(RoundedCornerShape(12.dp)).clickable(onClick = onIcon),
-            contentAlignment = Alignment.Center,
-        ) {
+        Box(Modifier.size(34.dp).clip(RoundedCornerShape(9.dp)), contentAlignment = Alignment.Center) {
+            val pkgIcon = meta?.icon
             when {
                 selected -> Box(Modifier.fillMaxSize().background(cs.primary), contentAlignment = Alignment.Center) {
-                    Icon(Icons.Default.Check, null, tint = cs.onPrimary)
+                    Icon(Icons.Default.Check, null, tint = cs.onPrimary, modifier = Modifier.size(20.dp))
                 }
-                item.isDir -> FolderIcon(item.path, 40.dp, if (item.isRepo) Icons.Default.Source else folderGlyph(item.path), item.empty)
+                item.isDir && pkgIcon != null -> Image(pkgIcon, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                item.isDir -> FolderIcon(item.path, 34.dp, if (item.isRepo) Icons.Default.Source else folderGlyph(item.path), item.empty)
                 Thumbs.supports(item.name) -> Thumb(item) { TypeIcon(item) }
                 else -> TypeIcon(item)
             }
         }
-        Spacer(Modifier.width(14.dp))
+        Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Text(
-                item.name, color = nameColor, fontSize = 16.5.sp, fontWeight = FontWeight.Medium,
+                item.name, color = nameColor, fontSize = 15.sp, fontWeight = FontWeight.Medium,
                 maxLines = 1, overflow = TextOverflow.Ellipsis,
             )
             val date = DateFormat.format("dd/MM/yyyy HH:mm", item.modified).toString()
             val info = when {
                 item.isRepo -> "Git repo · $date"
-                item.isDir -> date
+                item.isDir -> listOfNotNull(meta?.label, date).joinToString(" · ")
                 else -> Formatter.formatShortFileSize(ctx, item.size) + " · " + date
             }
-            Text(info, color = descColor, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(info, color = descColor, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
     }
 }
 
 @Composable
 private fun TypeIcon(item: FItem) {
-    val cs = MaterialTheme.colorScheme
     val c = fileColor(item)
     Box(Modifier.fillMaxSize().background(c.copy(alpha = 0.22f)), contentAlignment = Alignment.Center) {
-        Icon(fileIcon(item), null, tint = c)
+        Icon(fileIcon(item), null, tint = c, modifier = Modifier.size(20.dp))
     }
 }
 
@@ -620,7 +765,7 @@ private fun Thumb(item: FItem, fallback: @Composable () -> Unit) {
     val ctx = LocalContext.current.applicationContext
     val bmp by produceState<ImageBitmap?>(Thumbs.peek(item), item.path, item.size, item.modified) {
         value = Thumbs.peek(item)
-            ?: withContext(Thumbs.dispatcher) { Thumbs.load(ctx, item, 128) }?.asImageBitmap()
+            ?: withContext(Thumbs.dispatcher) { Thumbs.load(ctx, item, 96) }?.asImageBitmap()
     }
     val b = bmp
     if (b != null) Image(b, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop) else fallback()
@@ -630,29 +775,32 @@ private fun Thumb(item: FItem, fallback: @Composable () -> Unit) {
 
 private class Act(
     val icon: ImageVector, val label: String,
-    val danger: Boolean = false, val dismiss: Boolean = true, val run: () -> Unit,
+    val danger: Boolean = false,
+    /** Keeps the menu open (the "Thêm…" toggle). */
+    val keepOpen: Boolean = false,
+    val run: () -> Unit,
 )
 
 @Composable
 private fun ColumnScope.ItemMenuContent(
-    vm: FmViewModel, idx: Int, item: FItem, close: () -> Unit, onRename: () -> Unit,
+    vm: FmViewModel, idx: Int, item: FItem, d: MenuDrag, close: () -> Unit, onRename: () -> Unit,
 ) {
     val isArchive = !item.isDir && Archives.isArchive(item.name)
 
     val lower = item.name.lowercase()
     val isApk = !item.isDir && lower.endsWith(".apk")
     val isBundle = !item.isDir && (lower.endsWith(".apks") || lower.endsWith(".xapk") || lower.endsWith(".apkm"))
-    val dirHasApks = remember(item.path) {
-        item.isDir && (File(item.path).list { _, n -> n.lowercase().endsWith(".apk") }?.size ?: 0) >= 2
-    }
+    val dirHasApks = remember(item.path) { item.isDir && isSplitApkDir(File(item.path)) }
 
     val main = mutableListOf<Act>()
+    if (!item.isDir) main += Act(Icons.AutoMirrored.Filled.OpenInNew, "Mở") { vm.open(idx, item) }
     main += Act(Icons.Default.CheckCircle, "Chọn") { vm.toggleSelect(idx, item) }
     main += Act(Icons.Default.Edit, "Đổi tên") { onRename() }
     main += Act(Icons.Default.ContentCopy, "Sao chép") { vm.copy(idx, listOf(item)) }
     main += Act(Icons.Default.ContentCut, "Cắt") { vm.cut(idx, listOf(item)) }
     if (isArchive) {
         main += Act(Icons.Default.Unarchive, "Giải nén tại đây") { vm.extractHere(item) }
+        main += Act(Icons.Default.VerifiedUser, "Kiểm tra (Test)") { vm.testArchive(item) }
     }
     if (isApk) {
         main += Act(Icons.Default.Android, "Thông tin APK") { vm.apkInfo(item) }
@@ -680,24 +828,37 @@ private fun ColumnScope.ItemMenuContent(
         more += Act(Icons.Default.FolderZip, "Thêm ${c.items.size} mục đã chép vào ZIP") { vm.addClipToZip(item) }
     }
 
-    var expanded by remember { mutableStateOf(false) }
-    fun row(a: Act) = @Composable {
-        MenuRow(a.icon, a.label, if (a.danger) MenuDanger else MenuAccent) {
-            if (a.dismiss) close()
+    val all = ArrayList<Act>(main)
+    all += Act(if (d.expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore, if (d.expanded) "Ít hơn" else "Thêm…", keepOpen = true) {
+        d.expanded = !d.expanded
+        if (!d.expanded) d.bounds.keys.removeAll { it > main.size }
+    }
+    if (d.expanded) all += more
+    d.acts = all
+
+    all.forEachIndexed { i, a ->
+        val tint = when { a.danger -> MenuDanger; a.keepOpen -> MenuSub; else -> MenuAccent }
+        MenuRow(a.icon, a.label, tint, d.hover == i, { d.bounds[i] = it }) {
+            if (!a.keepOpen) close()
             a.run()
         }
     }
-    main.forEach { a -> row(a)() }
-    MenuRow(if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore, if (expanded) "Ít hơn" else "Thêm…", MenuSub) {
-        expanded = !expanded
-    }
-    if (expanded) more.forEach { a -> row(a)() }
 }
 
 @Composable
-private fun MenuRow(icon: ImageVector, label: String, tint: Color, onClick: () -> Unit) {
+private fun MenuRow(
+    icon: ImageVector, label: String, tint: Color,
+    hover: Boolean = false, onBounds: ((Rect) -> Unit)? = null, onClick: () -> Unit,
+) {
     Row(
-        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 14.dp, vertical = 8.dp),
+        Modifier.fillMaxWidth()
+            .then(
+                if (onBounds != null) Modifier.onGloballyPositioned { c ->
+                    onBounds(Rect(c.localToScreen(Offset.Zero), c.size.toSize()))
+                } else Modifier
+            )
+            .background(if (hover) Color(0x33FFFFFF) else Color.Transparent)
+            .clickable(onClick = onClick).padding(horizontal = 14.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(icon, null, tint = tint, modifier = Modifier.size(20.dp))
@@ -911,23 +1072,25 @@ private fun Viewer(item: FItem, siblings: List<FItem>, onClose: () -> Unit) {
 }
 
 /** ".." entry: tap = parent folder, long-press = select everything in this folder. */
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ParentRow(shape: Shape, onUp: () -> Unit, onSelectAll: () -> Unit) {
     val cs = MaterialTheme.colorScheme
+    var pressed by remember { mutableStateOf(false) }
+    val base = cs.surfaceContainerHighest
     Row(
-        Modifier.fillMaxWidth().clip(shape).background(cs.surfaceContainerHighest)
-            .combinedClickable(onClick = onUp, onLongClick = onSelectAll)
-            .heightIn(min = 56.dp).padding(start = 12.dp, end = 18.dp, top = 8.dp, bottom = 8.dp),
+        Modifier.fillMaxWidth()
+            .background(if (pressed) lerp(base, cs.onSurface, 0.1f) else base, shape)
+            .touchRow({ pressed = it }, { onUp() }, { onSelectAll() })
+            .heightIn(min = 44.dp).padding(start = 10.dp, end = 14.dp, top = 5.dp, bottom = 5.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Box(Modifier.size(40.dp).clip(RoundedCornerShape(12.dp)).background(cs.secondaryContainer), contentAlignment = Alignment.Center) {
-            Icon(Icons.Default.ArrowUpward, null, tint = cs.onSecondaryContainer)
+        Box(Modifier.size(34.dp).clip(RoundedCornerShape(9.dp)).background(cs.secondaryContainer), contentAlignment = Alignment.Center) {
+            Icon(Icons.Default.ArrowUpward, null, tint = cs.onSecondaryContainer, modifier = Modifier.size(20.dp))
         }
-        Spacer(Modifier.width(14.dp))
+        Spacer(Modifier.width(12.dp))
         Column {
-            Text("..", color = cs.onSurface, fontSize = 16.5.sp, fontWeight = FontWeight.Medium)
-            Text("Thư mục cha", color = cs.onSurfaceVariant, fontSize = 14.sp)
+            Text("..", color = cs.onSurface, fontSize = 15.sp, fontWeight = FontWeight.Medium)
+            Text("Thư mục cha", color = cs.onSurfaceVariant, fontSize = 12.sp)
         }
     }
 }
