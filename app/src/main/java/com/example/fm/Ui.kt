@@ -33,6 +33,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
@@ -330,7 +331,10 @@ fun FmRoot(vm: FmViewModel) {
 
     vm.viewing?.let { Viewer(it, vm.viewSiblings) { vm.viewing = null } }
     vm.editing?.let { item -> TextEditor(item) { vm.editing = null } }
-    vm.propsItem?.let { item -> PropertiesDialog(item, vm.rooted) { vm.propsItem = null } }
+    vm.propsItem?.let { item -> PropertiesDialog(item, vm) { vm.propsItem = null } }
+    vm.quick?.let { (item, info) ->
+        QuickEditDialog(info, { vm.quick = null }) { n -> vm.quick = null; vm.applyQuickEdit(item, n) }
+    }
     vm.batch?.let { list ->
         BatchRenameDialog(list, { vm.batch = null }) { sorted, names -> vm.batch = null; vm.batchRename(sorted, names) }
     }
@@ -353,12 +357,16 @@ fun PaneScreen(vm: FmViewModel, idx: Int) {
     var favOpen by remember { mutableStateOf(false) }
     var moreMenu by remember { mutableStateOf(false) }
     var searchOpen by remember { mutableStateOf(false) }
+    // a new folder must start at the top (the old scroll offset left the first rows hidden until a swipe)
+    val listState = rememberLazyListState()
+    LaunchedEffect(pane.path) { listState.scrollToItem(0) }
 
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize()) {
             // One list: folders first, files after (no separation)
             LazyColumn(
                 Modifier.weight(1f).fillMaxWidth(),
+                state = listState,
                 contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 88.dp),
                 verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
@@ -405,6 +413,9 @@ fun PaneScreen(vm: FmViewModel, idx: Int) {
                         }
                         if (sel.size >= 2) {
                             MenuRow(Icons.Default.DriveFileRenameOutline, "Đổi tên hàng loạt", MenuAccent) { moreMenu = false; vm.batch = sel }
+                        }
+                        if (sel.all { !it.isDir && it.name.lowercase().endsWith(".apk") } && sel.size >= 2) {
+                            MenuRow(Icons.Default.Layers, "Gộp APK đã chọn (Anti-split)", MenuAccent) { moreMenu = false; vm.antiSplit(sel) }
                         }
                     }
                 }
@@ -534,7 +545,7 @@ private fun FileEntry(
         )
         DropdownMenu(
             expanded = menu, onDismissRequest = { menu = false },
-            modifier = Modifier.widthIn(min = 300.dp, max = 360.dp),
+            modifier = Modifier.widthIn(min = 240.dp, max = 300.dp),
             shape = RoundedCornerShape(20.dp), containerColor = MenuBg,
         ) {
             ItemMenuContent(vm, idx, item, close = { menu = false }, onRename = onRename)
@@ -625,52 +636,71 @@ private fun ColumnScope.ItemMenuContent(
 ) {
     val isArchive = !item.isDir && Archives.isArchive(item.name)
 
-    val acts = mutableListOf<Act>()
-    acts += Act(Icons.Default.CheckCircle, "Chọn") { vm.toggleSelect(idx, item) }
-    acts += Act(Icons.Default.Edit, "Đổi tên") { onRename() }
-    acts += Act(Icons.Default.ContentCopy, "Sao chép") { vm.copy(idx, listOf(item)) }
-    acts += Act(Icons.Default.ContentCut, "Cắt") { vm.cut(idx, listOf(item)) }
-    acts += Act(Icons.Default.Archive, "Nén (tar.zst)") { vm.compress(listOf(item)) }
+    val lower = item.name.lowercase()
+    val isApk = !item.isDir && lower.endsWith(".apk")
+    val isBundle = !item.isDir && (lower.endsWith(".apks") || lower.endsWith(".xapk") || lower.endsWith(".apkm"))
+    val dirHasApks = remember(item.path) {
+        item.isDir && (File(item.path).list { _, n -> n.lowercase().endsWith(".apk") }?.size ?: 0) >= 2
+    }
+
+    // main actions are always shown, the rest sit behind "Thêm" so the menu stays short
+    val main = mutableListOf<Act>()
+    main += Act(Icons.Default.CheckCircle, "Chọn") { vm.toggleSelect(idx, item) }
+    main += Act(Icons.Default.Edit, "Đổi tên") { onRename() }
+    main += Act(Icons.Default.ContentCopy, "Sao chép") { vm.copy(idx, listOf(item)) }
+    main += Act(Icons.Default.ContentCut, "Cắt") { vm.cut(idx, listOf(item)) }
     if (isArchive) {
-        acts += Act(Icons.Default.Unarchive, "Giải nén tại đây") { vm.extractHere(item) }
-        acts += Act(Icons.Default.DriveFileMove, "Giải nén vào…") { vm.pickAndExtract(item, vm.panes[idx].path) }
-        acts += Act(Icons.Default.FolderZip, "Giải nén vào thư mục «${Archives.baseName(item.name)}»") { vm.extractNamed(item) }
+        main += Act(Icons.Default.Unarchive, "Giải nén tại đây") { vm.extractHere(item) }
+    }
+    if (isApk) {
+        main += Act(Icons.Default.Android, "Thông tin APK") { vm.apkInfo(item) }
+        main += Act(Icons.Default.InstallMobile, "Cài đặt APK") { vm.installApk(item) }
+    }
+    main += Act(Icons.Default.Delete, "Xóa", danger = true) { vm.delete(listOf(item)) }
+
+    val more = mutableListOf<Act>()
+    if (isApk) more += Act(Icons.Default.Tune, "Sửa nhanh (Quick Edit)") { vm.startQuickEdit(item) }
+    if (isBundle || dirHasApks) more += Act(Icons.Default.Layers, "Gộp split APK (Anti-split)") { vm.antiSplit(listOf(item)) }
+    more += Act(Icons.Default.Archive, "Nén (tar.zst)") { vm.compress(listOf(item)) }
+    if (isArchive) {
+        more += Act(Icons.Default.DriveFileMove, "Giải nén vào…") { vm.pickAndExtract(item, vm.panes[idx].path) }
+        more += Act(Icons.Default.FolderZip, "Giải nén vào thư mục «${Archives.baseName(item.name)}»") { vm.extractNamed(item) }
     }
     if (item.isDir) {
         val fav = item.path in vm.favorites
-        acts += Act(if (fav) Icons.Outlined.StarBorder else Icons.Default.Star,
+        more += Act(if (fav) Icons.Outlined.StarBorder else Icons.Default.Star,
             if (fav) "Bỏ khỏi lối tắt" else "Thêm vào lối tắt") { vm.toggleFavorite(item.path) }
     }
-    acts += Act(Icons.Default.Info, "Thuộc tính") { vm.propsItem = item }
-    if (!item.isDir) acts += Act(Icons.Default.Edit, "Mở bằng trình soạn thảo") { vm.editing = item }
-    if (!item.isDir && item.name.lowercase().endsWith(".apk")) {
-        acts += Act(Icons.Default.Android, "Thông tin APK") { vm.apkInfo(item) }
-        acts += Act(Icons.Default.InstallMobile, "Cài đặt APK") { vm.installApk(item) }
-    }
+    more += Act(Icons.Default.Info, "Thuộc tính") { vm.propsItem = item }
+    if (!item.isDir) more += Act(Icons.Default.Edit, "Mở bằng trình soạn thảo") { vm.editing = item }
     val c = vm.clip
-    if (!item.isDir && item.name.lowercase().endsWith(".zip") && c != null) {
-        acts += Act(Icons.Default.FolderZip, "Thêm ${c.items.size} mục đã chép vào ZIP") { vm.addClipToZip(item) }
+    if (!item.isDir && lower.endsWith(".zip") && c != null) {
+        more += Act(Icons.Default.FolderZip, "Thêm ${c.items.size} mục đã chép vào ZIP") { vm.addClipToZip(item) }
     }
-    acts += Act(Icons.Default.Delete, "Xóa", danger = true) { vm.delete(listOf(item)) }
 
-    acts.forEach { a ->
+    var expanded by remember { mutableStateOf(false) }
+    fun row(a: Act) = @Composable {
         MenuRow(a.icon, a.label, if (a.danger) MenuDanger else MenuAccent) {
             if (a.dismiss) close()
             a.run()
         }
     }
-
+    main.forEach { a -> row(a)() }
+    MenuRow(if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore, if (expanded) "Ít hơn" else "Thêm…", MenuSub) {
+        expanded = !expanded
+    }
+    if (expanded) more.forEach { a -> row(a)() }
 }
 
 @Composable
 private fun MenuRow(icon: ImageVector, label: String, tint: Color, onClick: () -> Unit) {
     Row(
-        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 16.dp, vertical = 11.dp),
+        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 14.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(icon, null, tint = tint, modifier = Modifier.size(22.dp))
-        Spacer(Modifier.width(16.dp))
-        Text(label, color = if (tint == MenuDanger) MenuDanger else MenuText, fontSize = 16.sp, fontWeight = FontWeight.Medium)
+        Icon(icon, null, tint = tint, modifier = Modifier.size(20.dp))
+        Spacer(Modifier.width(12.dp))
+        Text(label, color = if (tint == MenuDanger) MenuDanger else MenuText, fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 

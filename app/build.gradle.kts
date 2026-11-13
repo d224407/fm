@@ -74,6 +74,7 @@ android {
         resources.excludes += setOf(
             "/META-INF/{AL2.0,LGPL2.1}",
             "/META-INF/versions/**",
+            "/META-INF/maven/**",
             "/META-INF/MANIFEST.MF",
             "/META-INF/INDEX.LIST",
             "/META-INF/DEPENDENCIES",
@@ -110,6 +111,10 @@ dependencies {
     // Git
     implementation(libs.jgit)
     implementation(libs.slf4j.jdk14)
+
+    // APK tools: ARSCLib/APKEditor (merge splits, edit manifest) + signing
+    implementation(files("libs/apkeditor.jar"))
+    implementation("com.android.tools.build:apksig:${libs.versions.agp.get()}")
 
     // Xem file
     implementation(libs.coil.compose)

@@ -27,3 +27,12 @@
 -dontwarn javax.management.**
 -dontwarn org.ietf.jgss.**
 -dontwarn com.googlecode.javaewah.**
+
+# ARSCLib / APKEditor (bundled jar)
+-keep class com.reandroid.** { *; }
+-dontwarn com.reandroid.**
+-dontwarn org.jf.**
+-dontwarn org.antlr.**
+-dontwarn com.beust.**
+-dontwarn org.apache.commons.collections4.**
+-dontwarn com.android.apksig.**

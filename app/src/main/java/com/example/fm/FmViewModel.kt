@@ -14,6 +14,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 
 /** An archive opened as a virtual folder: [root] is the extracted copy of [file] in cache. */
@@ -55,6 +56,7 @@ class FmViewModel(private val app: Application) : AndroidViewModel(app) {
     var batch by mutableStateOf<List<FItem>?>(null)
     var viewSiblings by mutableStateOf<List<FItem>>(emptyList())
     var search by mutableStateOf<SearchState?>(null)
+    var quick by mutableStateOf<Pair<FItem, ApkOps.Info>?>(null)
     private var searchJob: Job? = null
     private val cachePrefix = File(app.cacheDir, "archive_view").path
 
@@ -258,7 +260,7 @@ class FmViewModel(private val app: Application) : AndroidViewModel(app) {
         val dst = panes[i].path
         run {
             val fail = c.items.filterNot { if (c.cut) Fs.move(it.path, dst) else Fs.copy(it.path, dst) }
-            if (c.cut) clip = null
+            if (c.cut || fail.isEmpty()) clip = null // the paste button goes away once done
             check(fail, "Dán")
         }
     }
@@ -353,7 +355,85 @@ class FmViewModel(private val app: Application) : AndroidViewModel(app) {
         if (fail.isNotEmpty()) error("Đổi tên thất bại: ${fail.joinToString()}")
     }
 
-    fun apkInfo(item: FItem) = show("APK · ${item.name}") { ApkTools.info(app, item.path) }
+    fun apkInfo(item: FItem) { propsItem = item }
+
+    private fun signApk(unsigned: File, out: File) {
+        app.assets.open("fm_key.pk8").use { k -> app.assets.open("fm_cert.der").use { c -> ApkSign.sign(k, c, unsigned, out) } }
+    }
+
+    private fun freeName(dir: File?, base: String): File {
+        var f = File(dir, "$base.apk")
+        var n = 1
+        while (f.exists()) f = File(dir, "${base}_${n++}.apk")
+        return f
+    }
+
+    fun startQuickEdit(item: FItem) {
+        viewModelScope.launch {
+            runCatching { withContext(Dispatchers.IO) { ApkOps.read(File(item.path)) } }
+                .onSuccess { quick = item to it }
+                .onFailure { DLog.e("quick edit read failed", it); message = "Không đọc được APK: ${it.message ?: it.javaClass.simpleName}" }
+        }
+    }
+
+    /** Edits the manifest, zip-aligns, signs; the result is written next to the source as *_edited.apk. */
+    fun applyQuickEdit(item: FItem, n: ApkOps.Info) = run {
+        val src = File(item.path)
+        val out = freeName(src.parentFile, src.name.substringBeforeLast('.') + "_edited")
+        val t1 = File(app.cacheDir, "qe_${System.nanoTime()}.tmp")
+        val t2 = File(app.cacheDir, "qe_${System.nanoTime()}_al.tmp")
+        try {
+            ApkOps.edit(src, t2, n, t1)
+            signApk(t2, out)
+        } finally {
+            t1.delete(); t2.delete()
+        }
+        message = "Đã tạo ${out.name}"
+    }
+
+    /**
+     * Anti-split: merges split APKs (.apks/.xapk/.apkm, a folder of APKs, or several selected .apk files)
+     * into one signed APK next to the source.
+     */
+    fun antiSplit(items: List<FItem>) = run {
+        val first = File(items[0].path)
+        val work = File(app.cacheDir, "antisplit_${System.nanoTime()}")
+        val t1 = File(app.cacheDir, "as_${System.nanoTime()}.tmp")
+        val t2 = File(app.cacheDir, "as_${System.nanoTime()}_al.tmp")
+        try {
+            val dir: File
+            val base: String
+            if (items.size == 1 && first.isDirectory) {
+                dir = first
+                base = first.name
+            } else {
+                work.mkdirs()
+                dir = work
+                base = if (items.size == 1) first.name.substringBeforeLast('.') else "merged"
+                var k = 0
+                if (items.size == 1) {
+                    java.util.zip.ZipFile(first).use { z ->
+                        for (e in z.entries()) {
+                            Work.check()
+                            if (e.isDirectory || !e.name.endsWith(".apk", ignoreCase = true)) continue
+                            z.getInputStream(e).use { i ->
+                                File(work, "${k++}_${File(e.name).name}").outputStream().use { o -> Work.copy(i, o) }
+                            }
+                        }
+                    }
+                } else {
+                    items.forEach { File(it.path).copyTo(File(work, "${k++}_${it.name}"), overwrite = true) }
+                }
+            }
+            if (dir.listFiles { f -> f.name.endsWith(".apk", ignoreCase = true) }.isNullOrEmpty()) error("Không tìm thấy file .apk để gộp")
+            val out = freeName(first.parentFile.takeIf { !first.isDirectory } ?: first.parentFile, "${base}_merged")
+            ApkOps.merge(dir, t2, t1)
+            signApk(t2, out)
+            message = "Đã gộp thành ${out.name}"
+        } finally {
+            work.deleteRecursively(); t1.delete(); t2.delete()
+        }
+    }
 
     fun installApk(item: FItem) {
         runCatching { ApkTools.install(app, item.path) }.onFailure { message = it.message ?: it.javaClass.simpleName }
