@@ -16,7 +16,7 @@ public final class ApkSign {
     private ApkSign() {}
 
     public static void sign(InputStream pk8, InputStream cert, File in, File out) throws Exception {
-        PrivateKey key = KeyFactory.getInstance("RSA").generatePrivate(new PKCS8EncodedKeySpec(pk8.readAllBytes()));
+        PrivateKey key = KeyFactory.getInstance("RSA").generatePrivate(new PKCS8EncodedKeySpec(readAll(pk8)));
         X509Certificate c = (X509Certificate) CertificateFactory.getInstance("X.509").generateCertificate(cert);
         ApkSigner.SignerConfig sc = new ApkSigner.SignerConfig.Builder("fm", key, Collections.singletonList(c)).build();
         new ApkSigner.Builder(Collections.singletonList(sc))
@@ -27,5 +27,13 @@ public final class ApkSign {
                 .setV3SigningEnabled(false)
                 .build()
                 .sign();
+    }
+
+    private static byte[] readAll(InputStream in) throws java.io.IOException {
+        java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream();
+        byte[] buf = new byte[8192];
+        int n;
+        while ((n = in.read(buf)) != -1) bo.write(buf, 0, n);
+        return bo.toByteArray();
     }
 }
