@@ -21,7 +21,6 @@ object GitTool {
             Git.init().setDirectory(dir).call().close()
             check(File(dir, ".git/HEAD").exists()) { "Git init không tạo được repo" }
         } catch (t: Throwable) {
-            // don't leave an empty .git behind
             if (!existed) File(dir, ".git").deleteRecursively()
             throw t
         }

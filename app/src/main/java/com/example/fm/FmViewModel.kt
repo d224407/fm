@@ -35,6 +35,10 @@ class PaneState(start: String) {
     var canFwd by mutableStateOf(false)
 }
 
+/** Messages of a throwable and its causes, one per line. */
+fun Throwable.chain(): String =
+    generateSequence(this) { it.cause }.map { it.message ?: it.javaClass.simpleName }.distinct().joinToString("\n<- ")
+
 /** Copy/cut buffer shared by both tabs. */
 data class Clip(val items: List<FItem>, val cut: Boolean)
 
@@ -47,6 +51,7 @@ class FmViewModel(private val app: Application) : AndroidViewModel(app) {
 
     var favorites by mutableStateOf<List<String>>(emptyList()); private set
     var message by mutableStateOf<String?>(null)
+    var toast by mutableStateOf<String?>(null)
     var busy by mutableStateOf(false)
     var output by mutableStateOf<Pair<String, String>?>(null)
     var picker by mutableStateOf<PickTarget?>(null)
@@ -95,7 +100,6 @@ class FmViewModel(private val app: Application) : AndroidViewModel(app) {
     fun navigate(i: Int, path: String, record: Boolean = true) {
         val p = panes[i]
         val a = p.archive
-        // history skips archive views (their cache folders are temporary)
         if (record && a == null && p.path != path && !path.startsWith(cachePrefix) && !p.path.startsWith(cachePrefix)) {
             p.back.addLast(p.path)
             if (p.back.size > 100) p.back.removeFirst()
@@ -140,7 +144,6 @@ class FmViewModel(private val app: Application) : AndroidViewModel(app) {
             return
         }
         var parent = File(p.path).parent ?: return
-        // skip ancestors we cannot list (e.g. /storage/emulated) unless root can
         while (parent != "/" && !rooted && File(parent).list() == null) parent = File(parent).parent ?: break
         navigate(i, parent)
     }
@@ -182,7 +185,7 @@ class FmViewModel(private val app: Application) : AndroidViewModel(app) {
                 Intent(Intent.ACTION_VIEW).setDataAndType(uri, mime)
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION)
             )
-        }.onFailure { DLog.e("open external failed", it); message = "Không có ứng dụng mở file này." }
+        }.onFailure { DLog.e("open external failed", it); toast = "Không có ứng dụng mở file này." }
     }
 
     /** Extract the archive into cache and browse it like a folder. */
@@ -247,7 +250,7 @@ class FmViewModel(private val app: Application) : AndroidViewModel(app) {
                 DLog.i("cancelled")
             } catch (ex: Throwable) {
                 DLog.e("action failed", ex)
-                message = ex.message ?: ex.javaClass.simpleName
+                message = ex.chain()
             } finally {
                 busy = false
                 panes.indices.forEach { refresh(it) }
@@ -359,7 +362,6 @@ class FmViewModel(private val app: Application) : AndroidViewModel(app) {
         val dir = File(items[0].path).parentFile ?: error("Không có thư mục cha")
         val own = items.map { it.name }.toSet()
         names.forEach { if (it !in own && File(dir, it).exists()) error("Đã tồn tại: $it") }
-        // two phases (via temp names) so swaps and shifts cannot collide
         val tmp = ArrayList<File>()
         try {
             items.forEachIndexed { k, it ->
@@ -394,7 +396,7 @@ class FmViewModel(private val app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             runCatching { withContext(Dispatchers.IO) { ApkOps.read(File(item.path)) } }
                 .onSuccess { quick = item to it }
-                .onFailure { DLog.e("quick edit read failed", it); message = "Không đọc được APK: ${it.message ?: it.javaClass.simpleName}" }
+                .onFailure { DLog.e("quick edit read failed", it); message = "Không đọc được APK: ${it.chain()}" }
         }
     }
 
@@ -410,13 +412,10 @@ class FmViewModel(private val app: Application) : AndroidViewModel(app) {
         } finally {
             t1.delete(); t2.delete()
         }
-        message = "Đã tạo ${out.name}"
+        toast = "Đã tạo ${out.name}"
     }
 
-    /**
-     * Anti-split: merges split APKs (.apks/.xapk/.apkm, a folder of APKs, or several selected .apk files)
-     * into one signed APK next to the source.
-     */
+    /** Anti-split: merges split APKs (.apks/.xapk/.apkm, a folder of APKs, or several selected .apk files) into one signed APK next to the source */
     fun antiSplit(items: List<FItem>) = run {
         val first = File(items[0].path)
         val work = File(app.cacheDir, "antisplit_${System.nanoTime()}")
@@ -451,7 +450,7 @@ class FmViewModel(private val app: Application) : AndroidViewModel(app) {
             val out = freeName(first.parentFile.takeIf { !first.isDirectory } ?: first.parentFile, "${base}_merged")
             ApkOps.merge(dir, t2, t1)
             signApk(t2, out)
-            message = "Đã gộp thành ${out.name}"
+            toast = "Đã gộp thành ${out.name}"
         } finally {
             work.deleteRecursively(); t1.delete(); t2.delete()
         }

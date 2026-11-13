@@ -7,7 +7,6 @@ import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 
-// Base tokens from the ADB app; dark surfaces lifted a notch for a brighter look
 private val Light = lightColorScheme(
     primary = Color(0xFF3A52A0), onPrimary = Color(0xFFFFFFFF),
     primaryContainer = Color(0xFFD0DBFF), onPrimaryContainer = Color(0xFF304578),

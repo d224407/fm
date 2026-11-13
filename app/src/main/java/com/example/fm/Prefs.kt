@@ -11,7 +11,6 @@ class Prefs(ctx: Context) {
         val saved = sp.getString("favs", null)
         if (saved != null) {
             val l = saved.split("\n").filter { it.isNotBlank() }
-            // one-time: add "/" once root is available
             if (!sp.getBoolean("root_fav", false) && Fs.hasRoot()) {
                 sp.edit().putBoolean("root_fav", true).apply()
                 if ("/" !in l) return (listOf("/") + l).also { save(it) }

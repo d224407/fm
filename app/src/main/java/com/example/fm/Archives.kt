@@ -83,7 +83,6 @@ object Archives {
         return out
     }
 
-    // xz/lzma presets stay at or below 6: preset 9 needs ~670 MB of heap, too much for a phone
     private fun xzPreset(l: ArcLevel) = when (l) { ArcLevel.FAST -> 1; ArcLevel.NORMAL -> 4; ArcLevel.MAX -> 6 }
 
     private fun writeTar(srcs: List<File>, base: File, out: File, fmt: ArcFormat, level: ArcLevel) {
@@ -96,7 +95,6 @@ object Archives {
             else -> {
                 val zl = when (level) { ArcLevel.FAST -> 1; ArcLevel.NORMAL -> 3; ArcLevel.MAX -> 19 }
                 val zs = ZstdOutputStream(fos, zl)
-                // multithreaded compression when the native lib supports it (fewer workers at max level: memory)
                 val w = Runtime.getRuntime().availableProcessors().coerceIn(1, if (level == ArcLevel.MAX) 4 else 8)
                 runCatching { zs.setWorkers(w) }
                 zs
@@ -199,7 +197,6 @@ object Archives {
                 else try {
                     unzip(archive, dest)
                 } catch (e: java.util.zip.ZipException) {
-                    // java.util.zip / Android's ZipFile reject encrypted entries (message differs per runtime)
                     val enc = runCatching { net.lingala.zip4j.ZipFile(archive).use { it.isEncrypted() } }.getOrDefault(false)
                     if (enc) throw PasswordNeeded(false)
                     throw e
@@ -243,7 +240,6 @@ object Archives {
         } catch (e: PasswordRequiredException) {
             throw PasswordNeeded(false)
         } catch (e: java.io.IOException) {
-            // wrong key -> garbage after decryption -> decoder/CRC errors
             if (password != null) throw PasswordNeeded(true)
             throw e
         }
@@ -290,7 +286,6 @@ object Archives {
 
     /** Zip-slip guard. */
     private fun safe(dest: File, name: String): File {
-        // pure path math (no syscalls per entry)
         val root = dest.absoluteFile.toPath().normalize()
         val t = root.resolve(name.trimStart('/')).normalize()
         require(t.startsWith(root)) { "Đường dẫn không hợp lệ: $name" }

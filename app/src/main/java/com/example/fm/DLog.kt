@@ -19,10 +19,7 @@ import java.util.logging.Level
 import java.util.logging.LogRecord
 import java.util.logging.SimpleFormatter
 
-/**
- * Debug log: in-memory ring (shown in-app) + file (flushed per line, survives crashes).
- * Also captures stdout/stderr, java.util.logging (JGit via slf4j-jdk14) and uncaught exceptions.
- */
+/** Debug log: in-memory ring (shown in-app) + file (flushed per line, survives crashes) */
 object DLog {
     private const val TAG = "FM"
     private const val MAX_LINES = 3000

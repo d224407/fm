@@ -110,7 +110,6 @@ import java.io.File
 private val FolderOrange = Color(0xFFFFB02E)
 private val StorageGreen = Color(0xFF5BA11E)
 
-// Popup (drop-down) palette: bright black, fixed in light and dark mode
 private val MenuBg = Color(0xFF45454B)
 private val MenuText = Color(0xFFFFFFFF)
 private val MenuSub = Color(0xFFCACAD2)
@@ -214,7 +213,6 @@ private fun FolderIcon(path: String, size: Dp = 40.dp, glyph: ImageVector? = fol
     Box(Modifier.size(size), contentAlignment = Alignment.Center) {
         Icon(if (empty) Icons.Outlined.Folder else Icons.Default.Folder, null, tint = FolderOrange, modifier = Modifier.fillMaxSize())
         if (glyph != null) {
-            // empty folders keep their glyph, drawn in the folder color inside the outline
             Icon(glyph, null, tint = if (empty) FolderOrange else Color.White,
                 modifier = Modifier.padding(top = size * 0.15f).size(size * 0.4f))
         }
@@ -297,6 +295,9 @@ fun FmRoot(vm: FmViewModel) {
         }
     }
 
+    val toastCtx = LocalContext.current
+    vm.toast?.let { t -> LaunchedEffect(t) { Toast.makeText(toastCtx, t, Toast.LENGTH_SHORT).show(); vm.toast = null } }
+
     vm.message?.let { msg ->
         AlertDialog(
             onDismissRequest = { vm.message = null },
@@ -366,13 +367,11 @@ fun PaneScreen(vm: FmViewModel, idx: Int) {
     var favOpen by remember { mutableStateOf(false) }
     var moreMenu by remember { mutableStateOf(false) }
     var searchOpen by remember { mutableStateOf(false) }
-    // a new folder must start at the top (the old scroll offset left the first rows hidden until a swipe)
     val listState = rememberLazyListState()
     LaunchedEffect(pane.path) { listState.scrollToItem(0) }
 
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize()) {
-            // One list: folders first, files after (no separation)
             LazyColumn(
                 Modifier.weight(1f).fillMaxWidth(),
                 state = listState,
@@ -430,7 +429,6 @@ fun PaneScreen(vm: FmViewModel, idx: Int) {
                 }
             }
 
-            // Bottom address bar (tap = shortcuts, selectable text) or selection summary
             Row(
                 Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 10.dp)
                     .heightIn(min = 60.dp).clip(RoundedCornerShape(30.dp))
@@ -447,7 +445,6 @@ fun PaneScreen(vm: FmViewModel, idx: Int) {
                     BarIcon(Icons.Default.SelectAll, "Chọn tất cả") { vm.selectAll(idx) }
                 } else {
                     if (vm.rooted) SmallChip("root")
-                    // Tap the path to open the favorites menu
                     Box(Modifier.weight(1f)) {
                         SelectionContainer(
                             Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).clickable { favOpen = true }
@@ -493,7 +490,6 @@ fun PaneScreen(vm: FmViewModel, idx: Int) {
         }
 
         if (!selecting && pane.archive == null) {
-            // "+" menu: new folder / file, git init (outside repos) and clone
             val root = pane.gitRoot
             Box(Modifier.align(Alignment.BottomEnd).padding(start = 16.dp, end = 16.dp, bottom = 88.dp)) {
                 FloatingActionButton(
@@ -579,7 +575,6 @@ private fun FileRow(
             .heightIn(min = 56.dp).padding(start = 12.dp, end = 18.dp, top = 8.dp, bottom = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        // Tapping the icon toggles selection
         Box(
             Modifier.size(40.dp).clip(RoundedCornerShape(12.dp)).clickable(onClick = onIcon),
             contentAlignment = Alignment.Center,
@@ -624,7 +619,6 @@ private fun TypeIcon(item: FItem) {
 private fun Thumb(item: FItem, fallback: @Composable () -> Unit) {
     val ctx = LocalContext.current.applicationContext
     val bmp by produceState<ImageBitmap?>(Thumbs.peek(item), item.path, item.size, item.modified) {
-        // re-resolve on every key change so a modified file never keeps its old thumbnail
         value = Thumbs.peek(item)
             ?: withContext(Thumbs.dispatcher) { Thumbs.load(ctx, item, 128) }?.asImageBitmap()
     }
@@ -652,7 +646,6 @@ private fun ColumnScope.ItemMenuContent(
         item.isDir && (File(item.path).list { _, n -> n.lowercase().endsWith(".apk") }?.size ?: 0) >= 2
     }
 
-    // main actions are always shown, the rest sit behind "Thêm" so the menu stays short
     val main = mutableListOf<Act>()
     main += Act(Icons.Default.CheckCircle, "Chọn") { vm.toggleSelect(idx, item) }
     main += Act(Icons.Default.Edit, "Đổi tên") { onRename() }
@@ -718,7 +711,6 @@ private fun MenuRow(icon: ImageVector, label: String, tint: Color, onClick: () -
 @OptIn(ExperimentalFoundationApi::class)
 private fun MenuFav(path: String, removable: Boolean, onRemove: () -> Unit, onClick: () -> Unit) {
     val usage = remember(path) { Places.usage(path) }
-    // long-press (non-default shortcuts only) reveals a delete button
     var showDel by remember { mutableStateOf(false) }
     Row(
         Modifier.fillMaxWidth().combinedClickable(onClick = onClick, onLongClick = { if (removable) showDel = true }).padding(horizontal = 20.dp, vertical = 14.dp),
@@ -935,7 +927,7 @@ private fun ParentRow(shape: Shape, onUp: () -> Unit, onSelectAll: () -> Unit) {
         Spacer(Modifier.width(14.dp))
         Column {
             Text("..", color = cs.onSurface, fontSize = 16.5.sp, fontWeight = FontWeight.Medium)
-            Text("Thư mục cha · giữ để chọn tất cả", color = cs.onSurfaceVariant, fontSize = 14.sp)
+            Text("Thư mục cha", color = cs.onSurfaceVariant, fontSize = 14.sp)
         }
     }
 }

@@ -34,7 +34,6 @@ object Fs {
 
     fun list(path: String): List<FItem> {
         val inStorage = path.startsWith(android.os.Environment.getExternalStorageDirectory().path)
-        // Outside shared storage the app sees a filtered view; prefer root when available
         val viaRoot = if (!inStorage && !path.startsWith(localPrefix) && hasRoot()) listRoot(path) else null
         val arr = if (viaRoot != null && viaRoot.isNotEmpty()) null else File(path).listFiles()
         val raw = when {
@@ -55,10 +54,7 @@ object Fs {
         java.nio.file.Files.newDirectoryStream(d.toPath()).use { !it.iterator().hasNext() }
     }.getOrDefault(false)
 
-    /**
-     * /storage/emulated is not listable without root, which strands the user above shared storage;
-     * show the child that leads back to it.
-     */
+    /** /storage/emulated is not listable without root, which strands the user above shared storage */
     private fun ancestorEntry(path: String): List<FItem> {
         val sd = android.os.Environment.getExternalStorageDirectory().path
         val base = path.trimEnd('/')
@@ -69,7 +65,6 @@ object Fs {
 
     private fun listRoot(path: String): List<FItem> {
         val base = path.trimEnd('/')
-        // one shell round trip; sections: repos, empty dirs, stat lines
         val all = Shell.cmd(
             "( cd ${q(path)} 2>/dev/null && { echo @R; ls -d ./*/.git 2>/dev/null; " +
                 "echo @E; find . -maxdepth 1 -mindepth 1 -type d -empty 2>/dev/null; " +
@@ -116,7 +111,6 @@ object Fs {
 
     fun delete(path: String): Boolean {
         val f = File(path)
-        // deleteRecursively follows symlinks into the target; remove the link itself only
         val link = runCatching { java.nio.file.Files.isSymbolicLink(f.toPath()) }.getOrDefault(false)
         val ok = if (link) f.delete() else f.deleteRecursively()
         return ok || (hasRoot() && Shell.cmd("rm -rf ${q(path)}").exec().isSuccess)
@@ -146,9 +140,7 @@ object Fs {
         var dst = File(destDir, src.name)
         val s = runCatching { src.canonicalFile }.getOrDefault(src.absoluteFile)
         val dir = runCatching { File(destDir).canonicalFile }.getOrDefault(File(destDir).absoluteFile)
-        // a folder cannot be copied into itself (endless recursion)
         if (src.isDirectory && (dir == s || dir.path.startsWith(s.path + File.separator))) return false
-        // same folder: copy under a new name (writing onto the source would truncate it)
         if (runCatching { dst.canonicalFile }.getOrDefault(dst.absoluteFile) == s) dst = uniqueName(dst)
         val ok = try {
             copyTree(src, dst)
@@ -173,7 +165,8 @@ object Fs {
 
     fun move(path: String, destDir: String): Boolean {
         val src = File(path)
-        val dst = File(destDir, src.name)
+        var dst = File(destDir, src.name)
+        if (dst.exists() && runCatching { dst.canonicalFile != src.canonicalFile }.getOrDefault(true)) dst = uniqueName(dst)
         if (src.renameTo(dst)) return true
         if (hasRoot() && Shell.cmd("mv ${q(path)} ${q(dst.path)}").exec().isSuccess) return true
         return copy(path, destDir) && delete(path)

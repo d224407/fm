@@ -1,42 +1,34 @@
-# Readable release stack traces
--keepattributes SourceFile,LineNumberTable,Signature,*Annotation*
+-keepattributes SourceFile,LineNumberTable,Signature,InnerClasses,EnclosingMethod,*Annotation*
 -renamesourcefileattribute SourceFile
 
-# JNI / reflection
 -keepclasseswithmembernames class * { native <methods>; }
 -keep class com.github.luben.zstd.** { *; }
 -keep class com.topjohnwu.superuser.** { *; }
 
-# JGit uses reflection + ServiceLoader
 -keep class org.eclipse.jgit.** { *; }
+-keep class org.slf4j.** { *; }
+-keep class org.apache.commons.compress.** { *; }
+-keep class net.lingala.zip4j.** { *; }
+-keep class com.reandroid.** { *; }
+
+# apksig reads ASN.1 fields/annotations by reflection; without this signing fails
+-keep class com.android.apksig.** { *; }
+
 -dontwarn org.eclipse.jgit.**
 -dontwarn org.slf4j.**
 -dontwarn org.apache.commons.compress.**
 -dontwarn org.tukaani.**
-
-# ServiceLoader files + Compose/coroutines are handled by AGP defaults
--keep class org.slf4j.** { *; }
--keep class org.apache.commons.compress.** { *; }
-
-# Optional commons-compress backends that are not bundled
 -dontwarn org.brotli.**
 -dontwarn org.objectweb.asm.**
 -dontwarn org.osgi.**
-
 -dontwarn java.lang.management.**
 -dontwarn javax.management.**
 -dontwarn org.ietf.jgss.**
 -dontwarn com.googlecode.javaewah.**
-
-# ARSCLib / APKEditor (bundled jar)
--keep class com.reandroid.** { *; }
 -dontwarn com.reandroid.**
 -dontwarn org.jf.**
 -dontwarn org.antlr.**
 -dontwarn com.beust.**
 -dontwarn org.apache.commons.collections4.**
 -dontwarn com.android.apksig.**
-
-# zip4j (encrypted zip)
--keep class net.lingala.zip4j.** { *; }
 -dontwarn net.lingala.zip4j.**

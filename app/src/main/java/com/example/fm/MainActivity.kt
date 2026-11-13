@@ -54,7 +54,6 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         checkAccess()
         setContent {
-            // Long-press (select / context menu) fires sooner than the system default (~500 ms)
             val base = LocalViewConfiguration.current
             val quick = remember(base) {
                 object : ViewConfiguration by base {
@@ -85,7 +84,6 @@ class MainActivity : ComponentActivity() {
 
     private fun requestAccess() {
         if (Build.VERSION.SDK_INT >= 30) {
-            // All-files access covers everything; launching a runtime dialog too would fight with this screen
             if (!Environment.isExternalStorageManager()) {
                 runCatching {
                     startActivity(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:$packageName")))

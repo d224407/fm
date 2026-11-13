@@ -323,7 +323,6 @@ fun PropertiesDialog(item: FItem, vm: FmViewModel, onClose: () -> Unit) {
             shape = RoundedCornerShape(28.dp), color = cs.surfaceContainerHigh,
         ) {
             Column(Modifier.padding(top = 20.dp, bottom = 8.dp)) {
-                // header
                 Row(Modifier.padding(horizontal = 24.dp), verticalAlignment = Alignment.CenterVertically) {
                     val bmp = icon
                     if (bmp != null) {
