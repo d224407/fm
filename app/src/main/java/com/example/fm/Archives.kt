@@ -162,7 +162,7 @@ object Archives {
     private fun awaitZip(zf: net.lingala.zip4j.ZipFile) {
         val pm = zf.getProgressMonitor()
         while (pm.getState() == ProgressMonitor.State.BUSY) {
-            if (Work.cancelled) pm.cancelAllTasks()
+            if (Work.cancelled) pm.setCancelAllTasks(true)
             Thread.sleep(50)
         }
         when (pm.getResult()) {

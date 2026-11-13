@@ -186,7 +186,7 @@ class FmViewModel(private val app: Application) : AndroidViewModel(app) {
     }
 
     /** Extract the archive into cache and browse it like a folder. */
-    fun openArchive(i: Int, item: FItem, pw: CharArray? = null) = run {
+    fun openArchive(i: Int, item: FItem, pw: CharArray? = null): Unit = run {
         try {
             val f = File(item.path)
             val key = (item.path + f.lastModified()).hashCode().toUInt().toString(16)
@@ -312,7 +312,7 @@ class FmViewModel(private val app: Application) : AndroidViewModel(app) {
         panes.indices.forEach { clearSelection(it) }
     }
 
-    fun extractTo(item: FItem, dir: File, pw: CharArray? = null) = run {
+    fun extractTo(item: FItem, dir: File, pw: CharArray? = null): Unit = run {
         try {
             Archives.extract(File(item.path), dir, pw)
         } catch (e: PasswordNeeded) {
