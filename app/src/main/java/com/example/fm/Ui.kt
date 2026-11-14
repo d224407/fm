@@ -422,7 +422,7 @@ fun PaneScreen(vm: FmViewModel, idx: Int) {
                         onRename = { renaming = it },
                     )
                 }
-                if (pane.items.isEmpty()) {
+                if (pane.items.isEmpty() && !pane.loading) {
                     item(key = "empty") {
                         Text(
                             "Trống hoặc không có quyền đọc.", color = cs.onSurfaceVariant,
@@ -448,6 +448,7 @@ fun PaneScreen(vm: FmViewModel, idx: Int) {
                     ) {
                         val sel = vm.selectedItems(idx)
                         if (sel.size == 1) MenuRow(Icons.Default.Info, "Thuộc tính", MenuAccent) { moreMenu = false; vm.propsItem = sel[0] }
+                        else MenuRow(Icons.Default.Info, "Thuộc tính", MenuAccent) { moreMenu = false; vm.propsMulti(sel) }
                         if (sel.size == 1 && !sel[0].isDir) {
                             MenuRow(Icons.Default.Edit, "Mở bằng trình soạn thảo", MenuAccent) { moreMenu = false; vm.editing = sel[0] }
                         }
@@ -590,7 +591,8 @@ private class MenuDrag {
     var expanded by mutableStateOf(false)
     var dragged = false
     var start = Offset.Zero
-    fun at(p: Offset): Int = bounds.entries.firstOrNull { it.value.contains(p) }?.key ?: -1
+    /** Item at the finger's height; x is ignored, so the finger may be anywhere outside the menu. */
+    fun at(p: Offset): Int = bounds.entries.firstOrNull { p.y >= it.value.top && p.y < it.value.bottom }?.key ?: -1
     fun reset() { hover = -1; expanded = false; dragged = false; bounds.clear() }
 }
 
@@ -728,8 +730,14 @@ private fun FileRow(
                 selected -> Box(Modifier.fillMaxSize().background(cs.primary), contentAlignment = Alignment.Center) {
                     Icon(Icons.Default.Check, null, tint = cs.onPrimary, modifier = Modifier.size(20.dp))
                 }
-                item.isDir && pkgIcon != null -> Image(pkgIcon, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
-                item.isDir -> FolderIcon(item.path, 34.dp, if (item.isRepo) Icons.Default.Source else folderGlyph(item.path), item.empty)
+                item.isDir -> {
+                    FolderIcon(item.path, 34.dp, if (item.isRepo) Icons.Default.Source else folderGlyph(item.path), item.empty)
+                    if (pkgIcon != null) Image(
+                        pkgIcon, null,
+                        Modifier.align(Alignment.BottomEnd).size(16.dp).clip(RoundedCornerShape(4.dp)),
+                        contentScale = ContentScale.Crop,
+                    )
+                }
                 Thumbs.supports(item.name) -> Thumb(item) { TypeIcon(item) }
                 else -> TypeIcon(item)
             }
@@ -794,6 +802,7 @@ private fun ColumnScope.ItemMenuContent(
 
     val main = mutableListOf<Act>()
     if (!item.isDir) main += Act(Icons.AutoMirrored.Filled.OpenInNew, "Mở") { vm.open(idx, item) }
+    if (!item.isDir) main += Act(Icons.Default.Apps, "Mở bằng…") { vm.openWith(item) }
     main += Act(Icons.Default.CheckCircle, "Chọn") { vm.toggleSelect(idx, item) }
     main += Act(Icons.Default.Edit, "Đổi tên") { onRename() }
     main += Act(Icons.Default.ContentCopy, "Sao chép") { vm.copy(idx, listOf(item)) }

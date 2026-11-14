@@ -18,9 +18,15 @@ object Places {
     fun isStorageRoot(p: String) = p == sd || p == "/sdcard" || storageRoot.matches(p)
 
     /** Package name for Android/{data,obb,media}/<pkg> on a storage volume, else null. */
+    private val dataParent = Regex("/data/(data|user/\\d+|user_de/\\d+)")
+
     fun pkgOf(path: String): String? {
         val f = File(path)
         val t = f.parentFile ?: return null
+        if (dataParent.matches(t.path)) return f.name.takeIf { pkgName.matches(it) }
+        // /data/app/~~x/<pkg>-<hash>
+        if (t.parentFile?.parent == "/data/app") return f.name.substringBefore('-').takeIf { pkgName.matches(it) }
+        if (t.path == "/data/app") return f.name.substringBefore('-').takeIf { '-' in f.name && pkgName.matches(it) }
         val a = t.parentFile ?: return null
         if (a.name != "Android" || t.name !in setOf("data", "obb", "media")) return null
         if (!isStorageRoot(a.parent ?: return null)) return null

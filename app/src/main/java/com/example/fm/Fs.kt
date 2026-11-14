@@ -68,24 +68,30 @@ object Fs {
         val all = Shell.cmd(
             "( cd ${q(path)} 2>/dev/null && { echo @R; ls -d ./*/.git 2>/dev/null; " +
                 "echo @E; find . -maxdepth 1 -mindepth 1 -type d -empty 2>/dev/null; " +
-                "echo @S; stat -L -c '%F|%s|%Y|%n' ./* ./.[!.]* 2>/dev/null; } )",
+                "echo @S; stat -L -c '%F|%s|%Y|%n' ./* ./.[!.]* 2>/dev/null; " +
+                "echo @N; stat -c '%F|%s|%Y|%n' ./* ./.[!.]* 2>/dev/null; } )",
         ).exec().out
         val repos = HashSet<String>()
         val empties = HashSet<String>()
         val out = ArrayList<String>()
+        val raw = ArrayList<String>()
         var sec = ' '
         for (l in all) {
             when (l) {
                 "@R" -> sec = 'R'
                 "@E" -> sec = 'E'
                 "@S" -> sec = 'S'
+                "@N" -> sec = 'N'
                 else -> when (sec) {
                     'R' -> repos += l.removePrefix("./").removeSuffix("/.git")
                     'E' -> empties += l.removePrefix("./")
                     'S' -> out += l
+                    'N' -> raw += l
                 }
             }
         }
+        val seen = out.mapTo(HashSet()) { it.split('|', limit = 4).getOrNull(3) }
+        out += raw.filter { it.split('|', limit = 4).getOrNull(3) !in seen }.map { it.replaceFirst(Regex("^[^|]*"), "regular file") }
         return out.mapNotNull { line ->
             val p = line.split('|', limit = 4)
             if (p.size < 4) return@mapNotNull null

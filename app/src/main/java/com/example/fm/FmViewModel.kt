@@ -33,6 +33,7 @@ class PaneState(start: String) {
     val fwd = ArrayDeque<String>()
     var canBack by mutableStateOf(false)
     var canFwd by mutableStateOf(false)
+    var loading by mutableStateOf(false)
 }
 
 /** Messages of a throwable and its causes, one per line. */
@@ -92,6 +93,7 @@ class FmViewModel(private val app: Application) : AndroidViewModel(app) {
             if (p.path != path) return@launch // user navigated away meanwhile: drop the stale result
             val paths = list.mapTo(HashSet(list.size)) { it.path }
             p.items = list
+            p.loading = false
             p.selected = p.selected.filterTo(HashSet()) { it in paths }
             p.gitRoot = root
         }
@@ -108,6 +110,8 @@ class FmViewModel(private val app: Application) : AndroidViewModel(app) {
         if (a != null && path != a.root && !path.startsWith(a.root + "/")) p.archive = null
         p.selected = emptySet()
         p.path = path
+        p.items = emptyList() // never show the previous folder while the new one loads
+        p.loading = true
         p.canBack = p.back.isNotEmpty()
         p.canFwd = p.fwd.isNotEmpty()
         DLog.d("navigate pane=$i path=$path")
@@ -176,14 +180,18 @@ class FmViewModel(private val app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun openExternal(item: FItem) {
+    /** "Open with": always shows the app chooser. */
+    fun openWith(item: FItem) = openExternal(item, true)
+
+    private fun openExternal(item: FItem, chooser: Boolean = false) {
         runCatching {
             val f = File(item.path)
             val uri = FileProvider.getUriForFile(app, "${app.packageName}.files", f)
             val mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(f.extension.lowercase()) ?: "*/*"
+            val view = Intent(Intent.ACTION_VIEW).setDataAndType(uri, mime)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION)
             app.startActivity(
-                Intent(Intent.ACTION_VIEW).setDataAndType(uri, mime)
-                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                if (chooser) Intent.createChooser(view, item.name).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) else view
             )
         }.onFailure { DLog.e("open external failed", it); toast = "Không có ứng dụng mở file này." }
     }
@@ -244,6 +252,9 @@ class FmViewModel(private val app: Application) : AndroidViewModel(app) {
         viewModelScope.launch(Dispatchers.IO) {
             Work.cancelled = false
             busy = true
+            val fg = runCatching {
+                androidx.core.content.ContextCompat.startForegroundService(app, Intent(app, TaskService::class.java))
+            }.isSuccess
             try {
                 block()
             } catch (ex: java.util.concurrent.CancellationException) {
@@ -253,6 +264,7 @@ class FmViewModel(private val app: Application) : AndroidViewModel(app) {
                 message = ex.chain()
             } finally {
                 busy = false
+                if (fg) app.stopService(Intent(app, TaskService::class.java))
                 panes.indices.forEach { refresh(it) }
             }
         }
@@ -397,6 +409,18 @@ class FmViewModel(private val app: Application) : AndroidViewModel(app) {
     }
 
     fun apkInfo(item: FItem) { propsItem = item }
+
+    /** Properties of several items: counts and total size. */
+    fun propsMulti(items: List<FItem>) = show("Thuộc tính (${items.size} mục)") {
+        var size = 0L
+        var files = 0
+        items.forEach {
+            if (it.isDir) { val (s, c) = Props.dirStats(File(it.path)) { !Work.cancelled }; size += s; files += c }
+            else { size += it.size; files++ }
+        }
+        "${items.count { it.isDir }} thư mục, ${items.count { !it.isDir }} tệp\n" +
+            "Tổng: ${android.text.format.Formatter.formatFileSize(app, size)} · $files tệp"
+    }
 
     private fun signApk(unsigned: File, out: File) {
         app.assets.open("fm_key.pk8").use { k -> app.assets.open("fm_cert.der").use { c -> ApkSign.sign(k, c, unsigned, out) } }
