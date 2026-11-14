@@ -21,10 +21,15 @@ class TaskService : Service() {
             .setContentTitle("Đang xử lý tệp…")
             .setOngoing(true)
             .build()
+        // startForeground must always run first, even when the intent only asks to stop
         runCatching {
             if (Build.VERSION.SDK_INT >= 29) startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
             else startForeground(1, n)
         }.onFailure { stopSelf() }
+        if (intent?.action == "stop") {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+        }
         return START_NOT_STICKY
     }
 }

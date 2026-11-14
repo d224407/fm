@@ -69,6 +69,9 @@ class FmViewModel(private val app: Application) : AndroidViewModel(app) {
     var pwdAsk by mutableStateOf<PwdAsk?>(null)
     var compressAsk by mutableStateOf<List<FItem>?>(null)
     private var searchJob: Job? = null
+    private val listCache = object : LinkedHashMap<String, List<FItem>>(16, 0.75f, true) {
+        override fun removeEldestEntry(e: MutableMap.MutableEntry<String, List<FItem>>) = size > 40
+    }
     private val cachePrefix = File(app.cacheDir, "archive_view").path
 
     init {
@@ -89,13 +92,14 @@ class FmViewModel(private val app: Application) : AndroidViewModel(app) {
             val path = p.path
             val list = runCatching { Fs.list(path) }
                 .onFailure { DLog.e("list failed: $path", it) }.getOrDefault(emptyList())
-            val root = GitTool.findRoot(path)?.path
             if (p.path != path) return@launch // user navigated away meanwhile: drop the stale result
+            synchronized(listCache) { listCache[path] = list }
             val paths = list.mapTo(HashSet(list.size)) { it.path }
             p.items = list
             p.loading = false
             p.selected = p.selected.filterTo(HashSet()) { it in paths }
-            p.gitRoot = root
+            val root = GitTool.findRoot(path)?.path // after the list is shown
+            if (p.path == path) p.gitRoot = root
         }
     }
 
@@ -110,8 +114,9 @@ class FmViewModel(private val app: Application) : AndroidViewModel(app) {
         if (a != null && path != a.root && !path.startsWith(a.root + "/")) p.archive = null
         p.selected = emptySet()
         p.path = path
-        p.items = emptyList() // never show the previous folder while the new one loads
-        p.loading = true
+        val cached = synchronized(listCache) { listCache[path] }
+        p.items = cached ?: emptyList() // never show the previous folder while the new one loads
+        p.loading = cached == null
         p.canBack = p.back.isNotEmpty()
         p.canFwd = p.fwd.isNotEmpty()
         DLog.d("navigate pane=$i path=$path")
@@ -247,14 +252,23 @@ class FmViewModel(private val app: Application) : AndroidViewModel(app) {
 
     // ---- Actions ----
 
+    private val running = java.util.concurrent.atomic.AtomicInteger()
+
+    /** Start/stop go through the same call, so startForeground() always runs before the service ends. */
+    private fun service(stop: Boolean) {
+        runCatching {
+            androidx.core.content.ContextCompat.startForegroundService(
+                app, Intent(app, TaskService::class.java).setAction(if (stop) "stop" else "start"),
+            )
+        }
+    }
+
     /** Runs [block] off the main thread; only failures are reported to the user. */
     private fun run(block: () -> Unit) {
         viewModelScope.launch(Dispatchers.IO) {
             Work.cancelled = false
             busy = true
-            val fg = runCatching {
-                androidx.core.content.ContextCompat.startForegroundService(app, Intent(app, TaskService::class.java))
-            }.isSuccess
+            if (running.incrementAndGet() == 1) service(false)
             try {
                 block()
             } catch (ex: java.util.concurrent.CancellationException) {
@@ -264,7 +278,7 @@ class FmViewModel(private val app: Application) : AndroidViewModel(app) {
                 message = ex.chain()
             } finally {
                 busy = false
-                if (fg) app.stopService(Intent(app, TaskService::class.java))
+                if (running.decrementAndGet() == 0) service(true)
                 panes.indices.forEach { refresh(it) }
             }
         }
